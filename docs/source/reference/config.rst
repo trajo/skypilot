@@ -3147,13 +3147,31 @@ Advanced Vast configuration (optional).
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 Configure SkyPilot to only consider offers on Vast verified datacenters (optional).
-Internally, this will query Vast with the ``datacenter=true`` and ``hosting_type>=1``
-parameters to filter for professional datacenter-hosted machines. Note some GPUs
+Internally, this will query Vast with the ``hosting_type>=1``
+parameter to filter for professional datacenter-hosted machines. Note some GPUs
 may only be available on non-datacenter offers. This config filters both the catalog
 (during resource planning) and the launch query (during provisioning). This config
 can be overridden per task via :ref:`config flag <config-client-cli-flag>`.
 
 Default: ``false``
+
+.. _config-yaml-vast-max-price-multiplier:
+
+``vast.max_price_multiplier``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Maximum live offer price relative to the catalog estimate (default: ``2.0``,
+minimum: ``1.0``). Before creating an instance, SkyPilot displays the selected
+GPU, location, live hourly rental plus allocated disk, catalog estimate, and
+price limit. It refuses creation if the live price exceeds the greater of
+``estimate * max_price_multiplier`` and ``estimate + $0.10/hour``.
+Metered network traffic is additional. For interruptible instances, the live
+price uses the configured bid (or the offer's minimum bid) plus allocated disk.
+If a historical spot catalog has a zero estimate, the guard uses the on-demand
+catalog price as its reference and logs a warning.
+This setting can be overridden per task via :ref:`config flag <config-client-cli-flag>`.
+Only raise it after reviewing the live price or refreshing a stale catalog.
+A dry run still shows catalog estimates; it does not reserve a live offer.
 
 .. _config-yaml-vast-create-instance-kwargs:
 

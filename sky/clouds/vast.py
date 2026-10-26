@@ -230,6 +230,12 @@ class Vast(clouds.Cloud):
             'region': region.name,
             'image_id': image_id,
             'secure_only': secure_only,
+            'max_price_multiplier': skypilot_config.get_effective_region_config(
+                cloud='vast',
+                region=region.name,
+                keys=('max_price_multiplier',),
+                default_value=2.0,
+                override_configs=resources.cluster_config_overrides),
             'create_instance_kwargs': create_instance_kwargs or {},
         }
 
