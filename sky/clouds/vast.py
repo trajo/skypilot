@@ -236,6 +236,12 @@ class Vast(clouds.Cloud):
                 keys=('max_price_multiplier',),
                 default_value=2.0,
                 override_configs=resources.cluster_config_overrides),
+            'max_hourly_cost': skypilot_config.get_effective_region_config(
+                cloud='vast',
+                region=region.name,
+                keys=('max_hourly_cost',),
+                default_value=None,
+                override_configs=resources.cluster_config_overrides),
             'create_instance_kwargs': create_instance_kwargs or {},
         }
 

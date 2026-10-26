@@ -328,3 +328,71 @@ def test_api_verification_field(sdk, offer, verification):
         with pytest.raises(RuntimeError, match='No matching Vast offer'):
             launch()
         sdk.create_instance.assert_not_called()
+
+
+def test_absolute_ceiling_replaces_catalog_guard_and_includes_disk(sdk, offer):
+    # The old catalog guard is .50; the requested 100GB quote is .5519.
+    offer['dph_total'] = .4
+    offer['search'] = {'totalHour': .5519}
+    launch(max_price_multiplier=1, max_hourly_cost=.6)
+    assert sdk.search_offers.call_args.kwargs['storage'] == 100
+    sdk.create_instance.assert_called_once()
+    sdk.create_instance.reset_mock()
+    with pytest.raises(utils.exceptions.ProvisionUnsupportedError,
+                       match='including 100 GB disk.*explicit') as error:
+        launch(max_price_multiplier=5, max_hourly_cost=.55)
+    sdk.create_instance.assert_not_called()
+    # This exact error survives API serialization and is non-capacity: the
+    # managed recovery loop stops rather than waiting for unavailable room.
+    error = utils.exceptions.deserialize_exception(
+        utils.exceptions.serialize_exception(error.value))
+    assert not isinstance(error, utils.exceptions.ResourcesUnavailableError)
+    assert isinstance(error, utils.exceptions.ProvisionUnsupportedError)
+
+
+def test_absolute_ceiling_selects_lowest_total_quote(sdk, offer):
+    expensive_disk = dict(offer, id=1, dph_total=.1, search={'totalHour': .7})
+    cheap_disk = dict(offer, id=2, dph_total=.4, search={'totalHour': .55})
+    sdk.search_offers.return_value = [expensive_disk, cheap_disk]
+    launch(max_hourly_cost=.6)
+    assert sdk.create_instance.call_args.kwargs['id'] == 2
+
+
+def test_absolute_ceiling_checks_spot_requested_disk(sdk, offer):
+    offer['storage_cost'] = .72
+    offer['min_bid'] = .5
+    launch(preemptible=True, max_hourly_cost=.6)
+    sdk.create_instance.reset_mock()
+    with pytest.raises(utils.exceptions.ProvisionUnsupportedError):
+        launch(preemptible=True,
+               max_hourly_cost=.6,
+               create_instance_kwargs={'disk': 101})
+    sdk.create_instance.assert_not_called()
+
+
+@pytest.mark.parametrize('ceiling', [0, -1, float('nan'), float('inf'), True])
+def test_invalid_absolute_ceiling(sdk, ceiling):
+    with pytest.raises(ValueError, match='max_hourly_cost'):
+        launch(max_hourly_cost=ceiling)
+    sdk.search_offers.assert_not_called()
+    sdk.create_instance.assert_not_called()
+
+
+def test_absolute_ceiling_task_override():
+    from sky import Task
+    task = Task.from_yaml_config({
+        'resources': {
+            'infra': 'vast',
+            'accelerators': 'RTX3090',
+            'max_hourly_cost': .6
+        },
+        'config': {
+            'vast': {
+                'max_hourly_cost': .6
+            }
+        }
+    })
+    assert next(iter(task.resources)
+               ).cluster_config_overrides['vast']['max_hourly_cost'] == .6
+    assert ('vast',
+            'max_hourly_cost') in constants.OVERRIDEABLE_CONFIG_KEYS_IN_TASK

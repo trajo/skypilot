@@ -13,6 +13,7 @@ import shlex
 from typing import Any, Dict, List, Optional
 
 from sky import catalog
+from sky import exceptions
 from sky import sky_logging
 from sky.adaptors import vast
 
@@ -123,7 +124,8 @@ def launch(name: str,
            login: Optional[str] = None,
            create_instance_kwargs: Optional[Dict[str, Any]] = None,
            ssh_public_key: Optional[str] = None,
-           max_price_multiplier: float = 2.0) -> str:
+           max_price_multiplier: float = 2.0,
+           max_hourly_cost: Optional[float] = None) -> str:
     """Launches an instance with the given parameters.
 
     Converts the instance_type to the Vast GPU name, finds the specs for the
@@ -152,8 +154,9 @@ def launch(name: str,
       - user: Run as specific user
 
     Offers are checked against the encoded instance resources before creation.
-    Live hourly rental plus disk must not exceed the catalog estimate by more
-    than max_price_multiplier (with a $0.10/hour allowance for small prices).
+    max_hourly_cost, when supplied, caps live hourly rental plus requested disk
+    and replaces the relative catalog guard. Otherwise the limit is the catalog
+    estimate times max_price_multiplier (with a $0.10/hour allowance).
     """
     # Vast.ai SDK v6+ no longer accepts port mappings via the env field, so
     # `ports` is currently unused. Keep it in the signature for caller
@@ -222,8 +225,17 @@ def launch(name: str,
                        'on-demand catalog price as the price guard reference.')
     if not math.isfinite(estimated_price) or estimated_price < 0:
         raise RuntimeError('Cannot verify the Vast catalog price estimate.')
-    price_limit = max(estimated_price * max_price_multiplier,
-                      estimated_price + 0.10)
+    if max_hourly_cost is not None:
+        if (isinstance(max_hourly_cost, bool) or
+                not math.isfinite(max_hourly_cost) or max_hourly_cost <= 0):
+            raise ValueError(
+                'vast.max_hourly_cost must be finite and positive.')
+        # An explicit absolute cap replaces the relative catalog guard. It
+        # includes the exact requested disk passed to search_offers below.
+        price_limit = max_hourly_cost
+    else:
+        price_limit = max(estimated_price * max_price_multiplier,
+                          estimated_price + 0.10)
     # Both legacy and current SDKs accept strings. Without georegion/chunked
     # directives, the current SDK preserves quoted names, lists and decimals.
     clauses = []
@@ -271,6 +283,15 @@ def launch(name: str,
                 f'limit ${price_limit:.4f}/hour). '
                 'Metered network charges are additional.')
     if actual_price > price_limit:
+        if max_hourly_cost is not None:
+            # Use the existing non-capacity failover path: the managed job
+            # must fail after exhausting candidates rather than repeat the
+            # same over-budget request indefinitely.
+            raise exceptions.ProvisionUnsupportedError(
+                f'Cheapest matching Vast offer ${actual_price:.4f}/hour '
+                f'including {required_disk:g} GB disk exceeds the explicit '
+                f'${price_limit:.4f}/hour ceiling. No instance was created. '
+                'Submit a new request after reviewing live prices or the cap.')
         raise RuntimeError(
             f'Vast offer price ${actual_price:.4f}/hour exceeds the '
             f'${price_limit:.4f}/hour limit based on the catalog estimate '

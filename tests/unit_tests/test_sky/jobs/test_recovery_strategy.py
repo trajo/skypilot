@@ -584,3 +584,33 @@ async def test_cancel_launch_request_tolerates_api_cancel_failure(monkeypatch):
     await executor._cancel_launch_request('req-1')
 
     sdk_get.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('raise_on_failure', [True, False])
+async def test_vast_absolute_price_failure_does_not_retry(
+        monkeypatch, raise_on_failure):
+    executor = _make_launch_executor()
+    patches = _patch_launch_environment(monkeypatch)
+    quote_error = exceptions.ProvisionUnsupportedError(
+        'Cheapest matching Vast offer $0.6100/hour including 100 GB disk '
+        'exceeds the explicit $0.6000/hour ceiling. No instance was created.')
+    # This is the wrapper produced by backend failover after exhausting the
+    # candidate; preserve it through the real API serialization boundary.
+    wrapped = exceptions.ResourcesUnavailableError(
+        str(quote_error), failover_history=[quote_error])
+    wrapped = exceptions.deserialize_exception(
+        exceptions.serialize_exception(wrapped))
+    executor._await_launch_request = mock.AsyncMock(side_effect=wrapped)
+    if raise_on_failure:
+        with pytest.raises(exceptions.ProvisionPrechecksError) as error:
+            await asyncio.wait_for(executor._launch(max_retry=None), timeout=2)
+        assert isinstance(error.value.reasons[0],
+                          exceptions.ProvisionUnsupportedError)
+    else:
+        assert await asyncio.wait_for(executor._launch(max_retry=None,
+                                                       raise_on_failure=False),
+                                      timeout=2) is None
+    patches.sdk_launch.assert_called_once()
+    patches.set_backoff_pending.assert_not_awaited()
+    executor._cleanup_cluster.assert_not_called()

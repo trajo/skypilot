@@ -2400,6 +2400,10 @@ def get_config_schema():
             'required': [],
             'additionalProperties': False,
             'properties': {
+                'max_hourly_cost': {
+                    'type': 'number',
+                    'exclusiveMinimum': 0,
+                },
                 'max_price_multiplier': {
                     'type': 'number',
                     'minimum': 1,
