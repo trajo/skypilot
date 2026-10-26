@@ -41,7 +41,15 @@ def _offer_matches(offer: Dict[str, Any], query: Dict[str, Any]) -> bool:
     """Check every required resource locally, failing closed on missing data."""
     try:
         for field, constraint in query.items():
-            value = offer[field]
+            # Vast applies external=false on the server, but its offers may
+            # omit this marketplace flag or return null. It is not hardware
+            # metadata; still reject an explicit external=true response.
+            if field == 'external' and offer.get(field) is None:
+                continue
+            if field == 'verified' and field not in offer:
+                value = offer['verification'] == 'verified'
+            else:
+                value = offer[field]
             if field == 'geolocation':
                 # Raw offers end in a country code. Older SDKs may append a
                 # continent code; keep accepting those responses as well.
@@ -331,9 +339,12 @@ def launch(name: str,
     # Build onstart command - always prepend skypilot requirements
     # These commands are critical for SkyPilot operation and must always run,
     # even when using a template
+    sdk = vast.vast()
+    # Legacy SDKs expose api_key directly; newer ones use a client object.
+    api_client = getattr(sdk, 'client', sdk)
     skypilot_onstart = [
         'touch ~/.no_auto_tmux',
-        f'echo "{vast.vast().client.api_key}" > ~/.vast_api_key',
+        f'echo "{api_client.api_key}" > ~/.vast_api_key',
     ]
 
     # Inject SSH public key into authorized_keys if provided
@@ -354,7 +365,7 @@ def launch(name: str,
         skypilot_onstart.append(user_onstart_cmd)
     launch_params['onstart_cmd'] = ';'.join(skypilot_onstart)
 
-    # Handle env - Vast.ai SDK requires env as a dict, not a CLI-style string.
+    # New SDKs accept env dictionaries; legacy SDKs require CLI-style strings.
     # Merge user-provided env (dict or legacy string) with skypilot metadata.
     user_env = launch_params.pop('env', None)
     env_dict: Dict[str, str] = {'__SOURCE': 'skypilot'}
@@ -366,8 +377,18 @@ def launch(name: str,
             for match in re.finditer(r'-e\s+(\w+)=([^\s]*)', user_env):
                 env_dict[match.group(1)] = match.group(2)
     launch_params['env'] = env_dict
+    if api_client is sdk:
+        launch_params['env'] = ' '.join(f'-e {shlex.quote(f"{key}={value}")}'
+                                        for key, value in env_dict.items())
+        if 'price' in launch_params:
+            launch_params['bid_price'] = launch_params.pop('price')
 
     new_instance_contract = vast.vast().create_instance(**launch_params)
+    if (not isinstance(new_instance_contract, dict) or
+            not new_instance_contract.get('new_contract')):
+        raise RuntimeError('Vast did not return a new instance contract. '
+                           'Check account permissions, balance, and offer '
+                           'availability.')
 
     new_instance = vast.vast().show_instance(
         id=new_instance_contract['new_contract'])

@@ -289,3 +289,42 @@ def test_price_config_schema_and_task_override(multiplier):
     assert (
         'vast',
         'max_price_multiplier') in constants.OVERRIDEABLE_CONFIG_KEYS_IN_TASK
+
+
+@pytest.mark.parametrize('missing', [False, True])
+def test_server_only_external_flag(sdk, offer, missing):
+    offer['external'] = None
+    if missing:
+        del offer['external']
+    launch()
+    sdk.create_instance.assert_called_once()
+
+
+def test_legacy_sdk_api_key(sdk):
+    del sdk.client
+    sdk.api_key = 'legacy-test-key'
+    launch()
+    assert 'legacy-test-key' in sdk.create_instance.call_args.kwargs[
+        'onstart_cmd']
+
+
+@pytest.mark.parametrize('response', ['', None, 1, {'success': False}])
+def test_failed_creation_response(sdk, response):
+    sdk.create_instance.return_value = response
+    with pytest.raises(RuntimeError, match='new instance contract'):
+        launch()
+    sdk.show_instance.assert_not_called()
+
+
+@pytest.mark.parametrize('verification',
+                         ['verified', 'unverified', 'deverified'])
+def test_api_verification_field(sdk, offer, verification):
+    del offer['verified']
+    offer['verification'] = verification
+    if verification == 'verified':
+        launch()
+        sdk.create_instance.assert_called_once()
+    else:
+        with pytest.raises(RuntimeError, match='No matching Vast offer'):
+            launch()
+        sdk.create_instance.assert_not_called()
