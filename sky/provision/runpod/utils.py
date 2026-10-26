@@ -299,6 +299,7 @@ def launch(
     *,
     network_volume_id: Optional[str] = None,
     volume_mount_path: Optional[str] = None,
+    allowed_cuda_versions: Optional[List[str]] = None,
 ) -> str:
     """Launches an instance with the given parameters.
 
@@ -308,9 +309,19 @@ def launch(
     For GPU instances, we convert the instance_type to the RunPod GPU name,
     and finds the specs for the GPU, before launching the instance.
 
+    ``allowed_cuda_versions`` constrains on-demand GPU hosts to the explicit
+    driver versions supported by the container. The v0.14.x GraphQL API
+    supports a version allowlist rather than the REST API's version floor.
+
     Returns:
         instance_id: The instance ID.
     """
+    if allowed_cuda_versions is not None:
+        if preemptible or instance_type.startswith('cpu'):
+            raise ValueError('CUDA version constraints are supported only for '
+                             'on-demand GPU pods.')
+        if not allowed_cuda_versions:
+            raise ValueError('allowed_cuda_versions must not be empty.')
     name = f'{cluster_name}-{node_type}'
 
     # TODO(zhwu): keep this align with setups in
@@ -357,7 +368,7 @@ def launch(
     image_name_formatted, template_id = _create_template_for_docker_login(
         cluster_name, image_name, docker_login_config)
 
-    params = {
+    params: Dict[str, Any] = {
         'name': name,
         'image_name': image_name_formatted,
         'container_disk_in_gb': disk_size,
@@ -395,6 +406,9 @@ def launch(
             'min_memory_in_gb': gpu_specs['memoryInGb'] * gpu_quantity,
             'gpu_count': gpu_quantity,
         })
+
+    if allowed_cuda_versions is not None:
+        params['allowed_cuda_versions'] = list(allowed_cuda_versions)
 
     if preemptible is None or not preemptible:
         new_instance = runpod.runpod.create_pod(**params)

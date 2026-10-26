@@ -854,6 +854,8 @@ class TestRunPodProvisionVolume:
                         return {}  # missing keys -> defaults to []
 
         monkeypatch.setattr('sky.adaptors.runpod.runpod', _API)
+        monkeypatch.setattr(runpod_prov.global_user_state, 'get_clusters',
+                            lambda: [])
         used_pods, used_clusters = runpod_prov.get_volume_usedby(Cfg())
         assert used_pods == [] and used_clusters == []
 

@@ -79,3 +79,60 @@ class TestCreateTemplateForDockerLogin:
 
         # Server prefix should not be doubled.
         assert image == 'ghcr.io/my-org/my-image:tag'
+
+
+class TestLaunchCudaVersions:
+    """GraphQL host-version constraints remain opt-in and fail closed."""
+
+    _COMMON_KWARGS = dict(cluster_name='test-cuda',
+                          node_type='head',
+                          region='US',
+                          zone='US-TX-3',
+                          disk_size=20,
+                          image_name='runpod/pytorch:test',
+                          ports=None,
+                          public_key='ssh-ed25519 test',
+                          preemptible=False,
+                          bid_per_gpu=0.0,
+                          docker_login_config=None)
+
+    @pytest.mark.parametrize('versions', [None, ['12.8', '13.1']])
+    def test_on_demand_gpu_versions(self, versions):
+        with patch('sky.provision.runpod.utils.runpod') as mock_runpod:
+            mock_runpod.runpod.get_gpu.return_value = {'memoryInGb': 8}
+            mock_runpod.runpod.create_pod.return_value = {'id': 'test-pod'}
+            result = runpod_utils.launch(instance_type='1x_RTX3070_COMMUNITY',
+                                         allowed_cuda_versions=versions,
+                                         **self._COMMON_KWARGS)
+        assert result == 'test-pod'
+        params = mock_runpod.runpod.create_pod.call_args.kwargs
+        assert params['gpu_type_id'] == 'NVIDIA GeForce RTX 3070'
+        assert params['gpu_count'] == 1
+        assert params['cloud_type'] == 'COMMUNITY'
+        assert params['support_public_ip'] is True
+        if versions is None:
+            assert 'allowed_cuda_versions' not in params
+        else:
+            assert params['allowed_cuda_versions'] == versions
+
+    @pytest.mark.parametrize('instance_type,preemptible',
+                             [('cpu5c-4-8', False),
+                              ('1x_RTX3070_COMMUNITY', True)])
+    def test_unsupported_paths_fail_before_provider_calls(
+            self, instance_type, preemptible):
+        kwargs = self._COMMON_KWARGS.copy()
+        kwargs['preemptible'] = preemptible
+        with patch('sky.provision.runpod.utils.runpod') as mock_runpod:
+            with pytest.raises(ValueError, match='on-demand GPU'):
+                runpod_utils.launch(instance_type=instance_type,
+                                    allowed_cuda_versions=['12.8'],
+                                    **kwargs)
+            assert not mock_runpod.mock_calls
+
+    def test_empty_allowlist_fails_before_provider_calls(self):
+        with patch('sky.provision.runpod.utils.runpod') as mock_runpod:
+            with pytest.raises(ValueError, match='must not be empty'):
+                runpod_utils.launch(instance_type='1x_RTX3070_COMMUNITY',
+                                    allowed_cuda_versions=[],
+                                    **self._COMMON_KWARGS)
+            assert not mock_runpod.mock_calls
