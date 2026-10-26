@@ -225,6 +225,7 @@ def launch(
     *,
     network_volume_id: Optional[str] = None,
     volume_mount_path: Optional[str] = None,
+    min_cuda_version: Optional[str] = None,
 ) -> str:
     """Launches an instance with the given parameters.
 
@@ -235,10 +236,16 @@ def launch(
     and finds the specs for the GPU, before launching the instance.
 
     ``zone`` is a comma-separated list of RunPod data center ids.
+    ``min_cuda_version`` optionally constrains the on-demand GPU host driver
+    to support the container's CUDA version.
 
     Returns:
         instance_id: The instance ID.
     """
+    if min_cuda_version is not None and (preemptible or
+                                         instance_type.startswith('cpu')):
+        raise ValueError('A CUDA version floor is supported only for '
+                         'on-demand GPU pods.')
     name = f'{cluster_name}-{node_type}'
 
     # TODO(zhwu): keep this align with setups in
@@ -349,6 +356,8 @@ def launch(
             'minVcpuCountPerGpu': 4,
             'minRamPerGpu': gpu_memory_gb,
         }
+        if min_cuda_version is not None:
+            body['gpu']['minCudaVersion'] = min_cuda_version
         # Omitting the field defaults to SECURE, so an unknown tier must not
         # be dropped silently.
         if cloud_type not in ('SECURE', 'COMMUNITY'):

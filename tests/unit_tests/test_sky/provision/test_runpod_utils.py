@@ -295,6 +295,37 @@ class TestLaunch:
         assert 'mounts' not in body
         assert body['args'].startswith('bash -c ')
 
+    def test_gpu_cuda_floor(self, fake_rest):
+        rest = fake_rest({
+            ('GET', '/catalog/gpus/NVIDIA%20GeForce%20RTX%203070'): {
+                'memory': 8,
+            },
+            ('POST', '/pods'): {
+                'id': 'new-pod'
+            },
+        })
+        runpod_utils.launch(instance_type='1x_RTX3070_COMMUNITY',
+                            min_cuda_version='12.8',
+                            **self._COMMON_KWARGS)
+        body = rest.calls[-1][2]
+        assert body['gpu']['id'] == 'NVIDIA GeForce RTX 3070'
+        assert body['gpu']['count'] == 1
+        assert body['gpu']['minCudaVersion'] == '12.8'
+        assert body['cloud'] == 'COMMUNITY'
+
+    @pytest.mark.parametrize('instance_type,preemptible',
+                             [('cpu5c-4-8', False),
+                              ('1x_RTX3070_COMMUNITY', True)])
+    def test_cuda_floor_rejects_unsupported_paths(self, fake_rest,
+                                                  instance_type, preemptible):
+        rest = fake_rest({})
+        kwargs = dict(self._COMMON_KWARGS, preemptible=preemptible)
+        with pytest.raises(ValueError, match='on-demand GPU'):
+            runpod_utils.launch(instance_type=instance_type,
+                                min_cuda_version='12.8',
+                                **kwargs)
+        assert rest.calls == []
+
     def test_cpu_pod_body_with_network_volume(self, fake_rest):
         rest = fake_rest({('POST', '/pods'): {'id': 'new-pod'}})
 
