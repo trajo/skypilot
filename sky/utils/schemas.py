@@ -2527,6 +2527,10 @@ def get_config_schema():
             'required': [],
             'additionalProperties': False,
             'properties': {
+                'max_price_multiplier': {
+                    'type': 'number',
+                    'minimum': 1,
+                },
                 'datacenter_only': {
                     'type': 'boolean',
                 },

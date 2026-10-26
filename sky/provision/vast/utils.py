@@ -5,14 +5,82 @@
 # python sdk.
 #
 """Vast library wrapper for SkyPilot."""
+import json
+import math
 from pathlib import Path
+import re
 import shlex
 from typing import Any, Dict, List, Optional
 
+from sky import catalog
 from sky import sky_logging
 from sky.adaptors import vast
 
 logger = sky_logging.init_logger(__name__)
+
+# Country groups used by Vast's georegion directive (vastai/utils.py).
+_GEOREGIONS = {
+    'AF': ('DZ,AO,BJ,BW,BF,BI,CM,CV,CF,TD,KM,CD,CG,DJ,EG,GQ,ER,ET,GA,GM,GH,GN,'
+           'GW,KE,LS,LR,LY,MW,MA,ML,MR,MU,MZ,NA,NE,NG,RW,SH,ST,SN,SC,SL,SO,ZA,'
+           'SS,SD,SZ,TZ,TG,TN,UG,YE,ZM,ZW'),  # Africa
+    'AS': ('AE,AM,AR,AU,AZ,BD,BH,BN,BT,MM,KH,KP,IN,ID,IR,IQ,IL,JP,JO,KZ,LV,'
+           'LI,MY,MV,MN,NP,KR,PK,PH,QA,SA,SG,LK,SY,TW,TJ,TH,TR,TM,VN,YE,HK,'
+           'CN,OM'),  # Asia
+    'EU': ('AL,AD,AT,BY,BE,BA,BG,HR,CY,CZ,DK,EE,'
+           'FI,FR,GE,DE,GR,HU,IS,IT,KZ,LV,LI,LT,'
+           'LU,MT,MD,MC,ME,NL,NO,PL,PT,RO,RU,RS,'
+           'SK,SI,ES,SE,CH,UA,GB,VA,MK'),  # Europe
+    'LC': ('AG,AR,BS,BB,BZ,BO,BR,CL,CO,CR,CU,DO,EC,SV,GY,HT,HN,JM,MX,NI,PA,PY,'
+           'PE,PR,RD,SUR,TT,UR,VZ'),  # Latin America and the Caribbean
+    'NA': 'CA,US',  # Northern America
+    'OC': ('AU,FJ,GU,KI,MH,FM,NR,NZ,PG,PW,SL,TO,TV,VU'),  # Oceania
+}
+
+
+def _offer_matches(offer: Dict[str, Any], query: Dict[str, Any]) -> bool:
+    """Check every required resource locally, failing closed on missing data."""
+    try:
+        for field, constraint in query.items():
+            value = offer[field]
+            if field == 'geolocation':
+                # Raw offers end in a country code. Older SDKs may append a
+                # continent code; keep accepting those responses as well.
+                locations = str(value).split(',')
+                value = locations[-1].strip()[-2:]
+                if value in _GEOREGIONS and len(locations) > 1:
+                    value = locations[-2].strip()[-2:]
+            if 'eq' in constraint and value != constraint['eq']:
+                return False
+            if 'in' in constraint and value not in constraint['in']:
+                return False
+            if 'gte' in constraint:
+                number = float(value)
+                if not math.isfinite(number) or number < constraint['gte']:
+                    return False
+        return True
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _offer_price(offer: Dict[str, Any], preemptible: bool, disk_size: float,
+                 bid: Optional[float]) -> float:
+    """Return hourly rental plus allocated disk, excluding metered traffic."""
+    if preemptible:
+        # Vast quotes storage_cost per GB per month (30 days).
+        minimum_bid = float(offer['min_bid'])
+        price = minimum_bid if bid is None else float(bid)
+        storage_cost = float(offer['storage_cost'])
+        if (not math.isfinite(minimum_bid) or minimum_bid < 0 or
+                price < minimum_bid or not math.isfinite(storage_cost) or
+                storage_cost < 0):
+            raise ValueError('Invalid Vast bid or storage price')
+        price += storage_cost * disk_size / (30 * 24)
+    else:
+        price = float(
+            offer.get('search', {}).get('totalHour', offer.get('dph_total')))
+    if not math.isfinite(price) or price < 0:
+        raise ValueError('Invalid Vast offer price')
+    return price
 
 
 def list_instances() -> Dict[str, Dict[str, Any]]:
@@ -46,7 +114,8 @@ def launch(name: str,
            private_docker_registry: Optional[bool] = None,
            login: Optional[str] = None,
            create_instance_kwargs: Optional[Dict[str, Any]] = None,
-           ssh_public_key: Optional[str] = None) -> str:
+           ssh_public_key: Optional[str] = None,
+           max_price_multiplier: float = 2.0) -> str:
     """Launches an instance with the given parameters.
 
     Converts the instance_type to the Vast GPU name, finds the specs for the
@@ -74,69 +143,132 @@ def launch(name: str,
       - args: Custom docker command arguments as list of strings
       - user: Run as specific user
 
-    Notes:
-      *  `georegion`: This is a feature flag to provide an additional
-         scope of geographical specificy while maintaining backward
-         compatibility.
-      *  `chunked`: This is a feature flag to give breadth to the
-         snowflake nature of the vast catalog marketplace. It rounds
-         down various specifications of machines to emulate an instance
-         type and make them more interchangeable.
-      *  `disk_size`: We look for instances that are of the requested
-         size or greater than it. For instance, `disk_size=100` might
-         return something with `disk_size` at 102 or even 1000.
-         The disk size {xx} GB is not exactly matched the requested
-         size {yy} GB. It is possible to charge extra cost on disk.
-      *  `ports`: This is a feature flag to expose ports to the internet.
-      *  `geolocation`: Geolocation on Vast can be as specific as the
-         host chooses to be. They can say, for instance, "Yutakachō,
-         Shinagawa District, Tokyo, JP." Such a specific geolocation
-         as ours would fail to return this host in a simple string
-         comparison if a user searched for "JP".
-         Since regardless of specificity, all our geolocations end
-         in two-letter country codes we just snip that to conform
-         to how many providers state their geolocation.
-      *  Since the catalog is cached, we can't gaurantee availability
-         of any machine at the point of inquiry.  As a consequence we
-         search for the machine again and potentially return a failure
-         if there is no availability.
-	  *  We pass in the cpu_ram here as a guarantor to make sure the
-		 instance we match with will be compliant with the requested
-		 amount of memory.
-      *  Vast instance types are an invention for skypilot. Refer to
-         catalog/vast_catalog.py for the current construction
-         of the type.
+    Offers are checked against the encoded instance resources before creation.
+    Live hourly rental plus disk must not exceed the catalog estimate by more
+    than max_price_multiplier (with a $0.10/hour allowance for small prices).
     """
     # Vast.ai SDK v6+ no longer accepts port mappings via the env field, so
     # `ports` is currently unused. Keep it in the signature for caller
     # compatibility and future use (port-forwarding is handled separately).
     del ports
-    cpu_ram = float(instance_type.split('-')[-1]) / 1024
-    gpu_name = instance_type.split('-')[1].replace('_', ' ')
-    num_gpus = int(instance_type.split('-')[0].replace('x', ''))
-
-    query = [
-        'chunked=true',
-        'georegion=true',
-        f'geolocation="{region[-2:]}"',
-        f'disk_space>={disk_size}',
-        f'num_gpus={num_gpus}',
-        f'gpu_name="{gpu_name}"',
-        f'cpu_ram>="{cpu_ram}"',
-    ]
+    # Split from the right: GPU model names themselves can contain hyphens.
+    gpu_spec, cpu_cores, cpu_ram = instance_type.rsplit('-', 2)
+    count, gpu_name = gpu_spec.split('x-', 1)
+    gpu_name = gpu_name.replace('_', ' ')
+    required_disk = max(disk_size,
+                        float((create_instance_kwargs or {}).get('disk') or 0))
+    countries = _GEOREGIONS.get(region[-2:], region[-2:]).split(',')
+    # Keep typed constraints for independent validation of API responses.
+    # Do not use chunked: it rewrites resource values before we can check them.
+    # Dictionary RAM values are in MB; the string parser multiplies GB by 1000.
+    query: Dict[str, Dict[str, Any]] = {
+        'geolocation': {
+            'in': countries
+        },
+        'disk_space': {
+            'gte': required_disk
+        },
+        'num_gpus': {
+            'eq': int(count)
+        },
+        'gpu_name': {
+            'eq': gpu_name
+        },
+        'cpu_ram': {
+            'gte': float(cpu_ram)
+        },
+        'cpu_cores_effective': {
+            'gte': float(cpu_cores)
+        },
+        'verified': {
+            'eq': True
+        },
+        'rentable': {
+            'eq': True
+        },
+        'rented': {
+            'eq': False
+        },
+        'external': {
+            'eq': False
+        },
+    }
     if secure_only:
-        query.append('datacenter=true')
-        query.append('hosting_type>=1')
-    query_str = ' '.join(query)
-
-    instance_list = vast.vast().search_offers(query=query_str)
-
-    if isinstance(instance_list, int) or len(instance_list) == 0:
-        raise RuntimeError('Failed to create instances, could not find an '
-                           'offer that satisfies the requirements '
-                           f'"{query_str}".')
-
-    instance_touse = instance_list[0]
+        query['hosting_type'] = {'gte': 1}
+    if not math.isfinite(max_price_multiplier) or max_price_multiplier < 1:
+        raise ValueError('vast.max_price_multiplier must be finite and >= 1.')
+    estimated_price = catalog.get_hourly_cost(instance_type,
+                                              preemptible,
+                                              region,
+                                              None,
+                                              clouds='vast')
+    # Historical chunked catalogs rounded all minimum bids down to zero.
+    # Keep spot usable with a conservative on-demand reference in that case.
+    if preemptible and estimated_price == 0:
+        estimated_price = catalog.get_hourly_cost(instance_type,
+                                                  False,
+                                                  region,
+                                                  None,
+                                                  clouds='vast')
+        logger.warning('Vast spot catalog estimate is zero; using the '
+                       'on-demand catalog price as the price guard reference.')
+    if not math.isfinite(estimated_price) or estimated_price < 0:
+        raise RuntimeError('Cannot verify the Vast catalog price estimate.')
+    price_limit = max(estimated_price * max_price_multiplier,
+                      estimated_price + 0.10)
+    # Both legacy and current SDKs accept strings. Without georegion/chunked
+    # directives, the current SDK preserves quoted names, lists and decimals.
+    clauses = []
+    value: Any
+    for field, constraint in query.items():
+        if 'in' in constraint:
+            value = '[' + ','.join(
+                json.dumps(v) for v in constraint['in']) + ']'
+            clauses.append(f'{field} in {value}')
+        else:
+            operator = '>=' if 'gte' in constraint else '='
+            value = constraint.get('gte', constraint.get('eq'))
+            if field == 'cpu_ram':
+                value /= 1000  # The SDK string parser converts GB to MB.
+            clauses.append(f'{field} {operator} {json.dumps(value)}')
+    query_str = ' '.join(clauses)
+    instance_list = vast.vast().search_offers(
+        query=query_str,
+        type='bid' if preemptible else 'on-demand',
+        storage=required_disk,
+        order='dph_total')
+    candidates = []
+    bid = (create_instance_kwargs or {}).get('bid_price')
+    if bid is None:
+        bid = (create_instance_kwargs or {}).get('price')
+    for offer in instance_list if isinstance(instance_list, list) else []:
+        if not isinstance(offer, dict) or not _offer_matches(offer, query):
+            continue
+        try:
+            price = _offer_price(offer, preemptible, required_disk, bid)
+            if offer.get('id') is None:
+                continue
+        except (KeyError, TypeError, ValueError):
+            continue
+        candidates.append((price, offer))
+    if not candidates:
+        raise RuntimeError('No matching Vast offer with a verifiable price '
+                           f'satisfies the requirements: {query}. '
+                           'No instance was created.')
+    actual_price, instance_touse = min(candidates, key=lambda item: item[0])
+    logger.info(f'Vast offer {instance_touse["id"]}: {gpu_name} x{count}, '
+                f'{instance_touse["geolocation"]}, '
+                f'${actual_price:.4f}/hour including allocated disk '
+                f'(catalog estimate ${estimated_price:.4f}/hour; '
+                f'limit ${price_limit:.4f}/hour). '
+                'Metered network charges are additional.')
+    if actual_price > price_limit:
+        raise RuntimeError(
+            f'Vast offer price ${actual_price:.4f}/hour exceeds the '
+            f'${price_limit:.4f}/hour limit based on the catalog estimate '
+            f'${estimated_price:.4f}/hour. No instance was created. '
+            'Refresh the catalog or explicitly adjust '
+            'vast.max_price_multiplier after reviewing the live price.')
 
     # Start with user-provided kwargs as the base
     launch_params: Dict[str, Any] = dict(create_instance_kwargs or {})
@@ -151,21 +283,21 @@ def launch(name: str,
 
     # Handle template - normalize both key names
     template_hash_id = launch_params.pop('template_hash_id', None)
+    template_hash = launch_params.pop('template_hash', None)
     if template_hash_id is None:
-        template_hash_id = launch_params.pop('template_hash', None)
+        template_hash_id = template_hash
     use_template = template_hash_id is not None
 
     if use_template:
         launch_params['template_hash'] = template_hash_id
-        launch_params['template_hash_id'] = template_hash_id
 
     # Handle image - user can override, but required if no template
     if 'image' not in launch_params and not use_template:
         launch_params['image'] = image_name
 
-    # Handle disk - user can override
-    if 'disk' not in launch_params and not use_template:
-        launch_params['disk'] = disk_size
+    # Explicitly allocate the disk used for resource and price checks, even
+    # with templates. Larger user overrides are included in the search price.
+    launch_params['disk'] = required_disk
 
     # Handle login - from function arg or user kwargs
     if login and 'login' not in launch_params:
@@ -231,7 +363,6 @@ def launch(name: str,
             env_dict.update(user_env)
         elif isinstance(user_env, str):
             # Parse legacy "-e KEY=VAL" style strings for backwards compat
-            import re  # pylint: disable=import-outside-toplevel
             for match in re.finditer(r'-e\s+(\w+)=([^\s]*)', user_env):
                 env_dict[match.group(1)] = match.group(2)
     launch_params['env'] = env_dict
