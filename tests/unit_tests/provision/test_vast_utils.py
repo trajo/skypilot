@@ -220,7 +220,7 @@ def test_template_and_custom_options(sdk):
     launch(
         create_instance_kwargs={
             'template_hash_id': 'template',
-            'label': 'custom',
+            'label': 'test',
             'env': {
                 'X': 'Y'
             },
@@ -230,7 +230,7 @@ def test_template_and_custom_options(sdk):
     params = sdk.create_instance.call_args.kwargs
     assert params['template_hash'] == 'template'
     assert 'template_hash_id' not in params
-    assert params['label'] == 'custom'
+    assert params['label'] == 'test'
     assert params['env'] == {'X': 'Y', '__SOURCE': 'skypilot'}
     assert params['direct'] is True
     assert params['onstart_cmd'].endswith('echo hello')
@@ -396,3 +396,27 @@ def test_absolute_ceiling_task_override():
                ).cluster_config_overrides['vast']['max_hourly_cost'] == .6
     assert ('vast',
             'max_hourly_cost') in constants.OVERRIDEABLE_CONFIG_KEYS_IN_TASK
+
+
+def test_create_identity_durable_before_readiness(sdk, monkeypatch, tmp_path):
+    from sky.provision.vast import journal
+    monkeypatch.setattr(journal, 'ROOT', tmp_path)
+    journal.register('display', 'cloud')
+    sdk.show_instance.side_effect = TimeoutError('not yet visible')
+    assert launch(name='cloud-head') == '456'
+    sdk.show_instance.assert_not_called()
+    assert journal.read('cloud')['ids'] == ['456']
+    assert journal.read('cloud')['pending'] is None
+
+
+def test_ambiguous_create_retains_intent(sdk, monkeypatch, tmp_path):
+    from sky.provision.vast import journal
+    monkeypatch.setattr(journal, 'ROOT', tmp_path)
+    journal.register('display', 'cloud')
+    sdk.create_instance.side_effect = TimeoutError('response lost')
+    with pytest.raises(TimeoutError):
+        launch(name='cloud-head')
+    assert journal.read('cloud')['pending'] == 'cloud-head'
+    with pytest.raises(RuntimeError, match='Unresolved'):
+        launch(name='cloud-head')
+    assert sdk.create_instance.call_count == 1

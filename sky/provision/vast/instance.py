@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from sky import sky_logging
 from sky.provision import common
 from sky.provision import docker_utils
+from sky.provision.vast import journal
 from sky.provision.vast import utils
 from sky.utils import common_utils
 from sky.utils import resources_utils
@@ -50,8 +51,8 @@ def _get_head_instance_id(instances: Dict[str, Any]) -> Optional[str]:
 def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
                   config: common.ProvisionConfig) -> common.ProvisionRecord:
     """Runs instances for the given cluster."""
-    del cluster_name  # unused
-    pending_status = ['CREATED', 'RESTARTING']
+    journal.register(cluster_name, cluster_name_on_cloud)
+    pending_status = ['CREATED', 'RESTARTING', 'LOADING', 'STARTING']
 
     create_instance_kwargs = config.provider_config.get(
         'create_instance_kwargs', {})
@@ -97,6 +98,10 @@ def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
     running_instances = status_filter(instances, ['RUNNING'])
     head_instance_id = _get_head_instance_id(running_instances)
     stopped_instances = status_filter(instances, ['EXITED', 'STOPPED'])
+    if len(running_instances) + len(stopped_instances) != len(instances):
+        raise RuntimeError(
+            'Vast instances have unresolved states; refusing duplicate creation'
+        )
 
     if config.resume_stopped_nodes and stopped_instances:
         for instance in stopped_instances.values():
@@ -167,7 +172,7 @@ def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
 
         time.sleep(POLL_INTERVAL)
 
-    head_instance_id = _get_head_instance_id(utils.list_instances())
+    head_instance_id = _get_head_instance_id(instances)
     assert head_instance_id is not None, 'head_instance_id should not be None'
     return common.ProvisionRecord(provider_name='vast',
                                   cluster_name=cluster_name_on_cloud,
@@ -210,6 +215,14 @@ def action_instances(
     """See sky/provision/__init__.py"""
     del provider_config  # unused
     instances = _filter_instances(cluster_name_on_cloud, None)
+    record = journal.read(cluster_name_on_cloud) if fn == 'remove' else None
+    if record and record['pending']:
+        if not any(i['name'] == record['pending'] for i in instances.values()):
+            raise RuntimeError(
+                'Unresolved Vast create outcome; cleanup unconfirmed')
+        record['ids'] = list(set(record['ids']) | set(instances))
+        record['pending'] = None
+        journal.write(record)
     for inst_id, inst in instances.items():
         logger.debug(f'Instance {fn} {inst_id}: {inst}')
         if worker_only and inst['name'].endswith('-head'):
@@ -223,6 +236,29 @@ def action_instances(
                     f'{common_utils.format_exception(e, use_bracket=False)}'
                 ) from e
 
+    if fn == 'remove':
+        # A successful DELETE response is not proof of resource absence.
+        for retry in range(6):
+            remaining = utils.list_instances()
+            labels = {f'{cluster_name_on_cloud}-worker'}
+            if not worker_only:
+                labels.add(f'{cluster_name_on_cloud}-head')
+            ids = set(
+                record['ids']) if record and not worker_only else set(instances)
+            live = {
+                key for key, value in remaining.items()
+                if key in ids or value['name'] in labels
+            }
+            if not live:
+                if record and not worker_only:
+                    record['cleaned'] = True
+                    journal.write(record)
+                return
+            if retry < 5:
+                time.sleep(2)
+        raise RuntimeError(
+            f'Vast cleanup unconfirmed; instances remain: {sorted(live)}')
+
 
 def get_cluster_info(
         region: str,
@@ -233,16 +269,17 @@ def get_cluster_info(
     instances: Dict[str, List[common.InstanceInfo]] = {}
     head_instance_id = None
     for instance_id, instance_info in running_instances.items():
-        # Vast.ai routes SSH through a gateway (ssh_host, e.g. ssh3.vast.ai).
-        # Using public_ipaddr directly causes SSH timeouts because direct
-        # access is blocked; the gateway is the only reachable path.
-        # ssh_port is always set; ports['22/tcp'] may be None in newer API.
+        # Direct host ports and gateway ports belong to different hosts.
+        # Prefer the direct mapping when available, otherwise use the gateway.
         ssh_host = (instance_info.get('ssh_host') or
                     instance_info.get('public_ipaddr', ''))
         ports_dict = instance_info.get('ports') or {}
         tcp22 = ports_dict.get('22/tcp') or []
-        ssh_port = (int(tcp22[0]['HostPort'])
-                    if tcp22 else instance_info.get('ssh_port'))
+        if tcp22 and instance_info.get('public_ipaddr'):
+            ssh_host = instance_info['public_ipaddr']
+            ssh_port = int(tcp22[0]['HostPort'])
+        else:
+            ssh_port = instance_info.get('ssh_port')
         instances[instance_id] = [
             common.InstanceInfo(
                 instance_id=instance_id,
@@ -293,7 +330,7 @@ def query_instances(
     statuses: Dict[str, Tuple[Optional['status_lib.ClusterStatus'],
                               Optional[str]]] = {}
     for inst_id, inst in instances.items():
-        status = status_map[inst['status']]
+        status = status_map.get(inst['status'], status_lib.ClusterStatus.INIT)
         if non_terminated_only and status is None:
             continue
         statuses[inst_id] = (status, None)

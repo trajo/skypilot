@@ -46,6 +46,7 @@ from sky.jobs import runtime as managed_job_runtime
 from sky.jobs import scheduler
 from sky.jobs import state as managed_job_state
 from sky.provision.kubernetes import utils as kubernetes_utils
+from sky.provision.vast import journal as vast_journal
 from sky.schemas.api import responses
 from sky.server.requests import requests as requests_lib
 from sky.skylet import constants
@@ -238,8 +239,11 @@ def terminate_cluster(
                 core.down(cluster_name,
                           graceful=graceful,
                           graceful_timeout=graceful_timeout)
+            vast_journal.cleanup_cluster(cluster_name)
             return
         except exceptions.ClusterDoesNotExist:
+            # A missing cluster row is not proof a partially created VM is gone.
+            vast_journal.cleanup_cluster(cluster_name)
             # The cluster is already down.
             logger.debug(f'The cluster {cluster_name} is already down.')
             return

@@ -16,6 +16,7 @@ from sky import catalog
 from sky import exceptions
 from sky import sky_logging
 from sky.adaptors import vast
+from sky.provision.vast import journal
 
 logger = sky_logging.init_logger(__name__)
 
@@ -96,8 +97,14 @@ def list_instances() -> Dict[str, Dict[str, Any]]:
     """Lists instances associated with API key."""
     instances = vast.vast().show_instances()
 
+    if not isinstance(instances, list):
+        raise RuntimeError('Ambiguous Vast inventory response')
     instance_dict: Dict[str, Dict[str, Any]] = {}
     for instance in instances:
+        if (not isinstance(instance, dict) or not instance.get('id') or
+                not isinstance(instance.get('label'), str)):
+            raise RuntimeError('Malformed Vast instance inventory')
+        instance = dict(instance)
         instance['id'] = str(instance['id'])
         info = instance
 
@@ -307,8 +314,10 @@ def launch(name: str,
     # Required skypilot parameters
     launch_params['id'] = instance_touse['id']
     # Use user's label if provided, otherwise use skypilot name
-    if 'label' not in launch_params:
-        launch_params['label'] = name
+    if launch_params.get('label', name) != name:
+        raise ValueError(
+            'Vast label must preserve the SkyPilot cluster identity')
+    launch_params['label'] = name
 
     # Handle template - normalize both key names
     template_hash_id = launch_params.pop('template_hash_id', None)
@@ -404,17 +413,21 @@ def launch(name: str,
         if 'price' in launch_params:
             launch_params['bid_price'] = launch_params.pop('price')
 
+    launch_params.setdefault('ssh', True)
+    launch_params.setdefault('direct', True)
+    launch_params.setdefault('cancel_unavail', True)
+    journal.creating(name)
     new_instance_contract = vast.vast().create_instance(**launch_params)
     if (not isinstance(new_instance_contract, dict) or
-            not new_instance_contract.get('new_contract')):
+            isinstance(new_instance_contract.get('new_contract'), bool) or
+            not str(new_instance_contract.get('new_contract', '')).isdigit()):
         raise RuntimeError('Vast did not return a new instance contract. '
                            'Check account permissions, balance, and offer '
                            'availability.')
 
-    new_instance = vast.vast().show_instance(
-        id=new_instance_contract['new_contract'])
-
-    return new_instance['id']
+    instance_id = str(new_instance_contract['new_contract'])
+    journal.created(name, instance_id)
+    return instance_id
 
 
 def start(instance_id: str) -> None:
