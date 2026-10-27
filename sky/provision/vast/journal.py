@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import tempfile
 
+from sky import exceptions
 from sky.utils import common_utils
 
 ROOT = Path.home() / '.sky' / 'vast-provisioning'
@@ -53,9 +54,22 @@ def register(cluster, name):
         raise RuntimeError('Vast provisioning identity mismatch')
 
 
-def creating(label):
+def creating(label, max_instance_creations=None):
     name = label.rsplit('-', 1)[0]
     value = read(name)
+    if max_instance_creations is not None:
+        if (isinstance(max_instance_creations, bool) or
+                not isinstance(max_instance_creations, int) or
+                max_instance_creations < 1):
+            raise ValueError(
+                'max_instance_creations must be a positive integer')
+        if value is None:
+            raise RuntimeError(
+                'Vast creation limit requires a provisioning journal')
+        if len(value['ids']) >= max_instance_creations:
+            raise exceptions.ProvisionUnsupportedError(
+                'Vast instance creation limit reached; '
+                'submit a new authorized request')
     if value is not None:
         if value['pending']:
             raise RuntimeError('Unresolved Vast create; reconcile before retry')

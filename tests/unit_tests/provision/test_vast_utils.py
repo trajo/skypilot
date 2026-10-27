@@ -388,12 +388,18 @@ def test_absolute_ceiling_task_override():
         },
         'config': {
             'vast': {
-                'max_hourly_cost': .6
+                'max_hourly_cost': .6,
+                'max_instance_creations': 1
             }
         }
     })
     assert next(iter(task.resources)
                ).cluster_config_overrides['vast']['max_hourly_cost'] == .6
+    assert next(iter(task.resources)
+               ).cluster_config_overrides['vast']['max_instance_creations'] == 1
+    assert (
+        'vast',
+        'max_instance_creations') in constants.OVERRIDEABLE_CONFIG_KEYS_IN_TASK
     assert ('vast',
             'max_hourly_cost') in constants.OVERRIDEABLE_CONFIG_KEYS_IN_TASK
 
@@ -419,4 +425,19 @@ def test_ambiguous_create_retains_intent(sdk, monkeypatch, tmp_path):
     assert journal.read('cloud')['pending'] == 'cloud-head'
     with pytest.raises(RuntimeError, match='Unresolved'):
         launch(name='cloud-head')
+    assert sdk.create_instance.call_count == 1
+
+
+def test_single_creation_limit_survives_cleanup(sdk, monkeypatch, tmp_path):
+    from sky import exceptions
+    from sky.provision.vast import journal
+    monkeypatch.setattr(journal, 'ROOT', tmp_path)
+    journal.register('display', 'cloud')
+    launch(name='cloud-head', max_instance_creations=1)
+    record = journal.read('cloud')
+    record['cleaned'] = True
+    journal.write(record)
+    with pytest.raises(exceptions.ProvisionUnsupportedError,
+                       match='creation limit'):
+        launch(name='cloud-head', max_instance_creations=1)
     assert sdk.create_instance.call_count == 1

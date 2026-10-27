@@ -15,6 +15,9 @@ provider:
   {%- if max_hourly_cost is not none %}
   max_hourly_cost: {{max_hourly_cost}}
   {%- endif %}
+  {%- if max_instance_creations is defined and max_instance_creations is not none %}
+  max_instance_creations: {{max_instance_creations}}
+  {%- endif %}
   {%- if create_instance_kwargs %}
   create_instance_kwargs: {{create_instance_kwargs | tojson}}
   {%- endif %}

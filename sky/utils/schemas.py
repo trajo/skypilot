@@ -2400,6 +2400,10 @@ def get_config_schema():
             'required': [],
             'additionalProperties': False,
             'properties': {
+                'max_instance_creations': {
+                    'type': 'integer',
+                    'minimum': 1
+                },
                 'max_hourly_cost': {
                     'type': 'number',
                     'exclusiveMinimum': 0,

@@ -132,7 +132,8 @@ def launch(name: str,
            create_instance_kwargs: Optional[Dict[str, Any]] = None,
            ssh_public_key: Optional[str] = None,
            max_price_multiplier: float = 2.0,
-           max_hourly_cost: Optional[float] = None) -> str:
+           max_hourly_cost: Optional[float] = None,
+           max_instance_creations: Optional[int] = None) -> str:
     """Launches an instance with the given parameters.
 
     Converts the instance_type to the Vast GPU name, finds the specs for the
@@ -416,7 +417,7 @@ def launch(name: str,
     launch_params.setdefault('ssh', True)
     launch_params.setdefault('direct', True)
     launch_params.setdefault('cancel_unavail', True)
-    journal.creating(name)
+    journal.creating(name, max_instance_creations)
     new_instance_contract = vast.vast().create_instance(**launch_params)
     if (not isinstance(new_instance_contract, dict) or
             isinstance(new_instance_contract.get('new_contract'), bool) or
