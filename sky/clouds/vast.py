@@ -249,6 +249,12 @@ class Vast(clouds.Cloud):
                     keys=('max_instance_creations',),
                     default_value=None,
                     override_configs=resources.cluster_config_overrides),
+            'excluded_hosts': skypilot_config.get_effective_region_config(
+                cloud='vast',
+                region=region.name,
+                keys=('excluded_hosts',),
+                default_value=None,
+                override_configs=resources.cluster_config_overrides),
             'create_instance_kwargs': create_instance_kwargs or {},
         }
 

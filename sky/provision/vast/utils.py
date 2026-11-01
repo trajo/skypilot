@@ -72,6 +72,23 @@ def _offer_matches(offer: Dict[str, Any], query: Dict[str, Any]) -> bool:
         return False
 
 
+def _host_id(offer: Dict[str, Any]) -> Optional[int]:
+    """Return the offer's integer Vast host ID, or None if absent."""
+    value = offer.get('host_id')
+    return value if isinstance(value, int) and not isinstance(value,
+                                                              bool) else None
+
+
+def _excluded_hosts(value: Optional[List[int]]) -> set:
+    if value is None:
+        return set()
+    if (not isinstance(value, (list, tuple)) or
+            any(isinstance(v, bool) or not isinstance(v, int) or v < 1
+                for v in value)):
+        raise ValueError('vast.excluded_hosts must list positive integers.')
+    return set(value)
+
+
 def _offer_price(offer: Dict[str, Any], preemptible: bool, disk_size: float,
                  bid: Optional[float]) -> float:
     """Return hourly rental plus allocated disk, excluding metered traffic."""
@@ -133,7 +150,8 @@ def launch(name: str,
            ssh_public_key: Optional[str] = None,
            max_price_multiplier: float = 2.0,
            max_hourly_cost: Optional[float] = None,
-           max_instance_creations: Optional[int] = None) -> str:
+           max_instance_creations: Optional[int] = None,
+           excluded_hosts: Optional[List[int]] = None) -> str:
     """Launches an instance with the given parameters.
 
     Converts the instance_type to the Vast GPU name, finds the specs for the
@@ -165,6 +183,9 @@ def launch(name: str,
     max_hourly_cost, when supplied, caps live hourly rental plus requested disk
     and replaces the relative catalog guard. Otherwise the limit is the catalog
     estimate times max_price_multiplier (with a $0.10/hour allowance).
+
+    excluded_hosts lists Vast host IDs never to rent from. With a non-empty
+    list, an offer without a host_id is skipped as well (fail closed).
     """
     # Vast.ai SDK v6+ no longer accepts port mappings via the env field, so
     # `ports` is currently unused. Keep it in the signature for caller
@@ -260,17 +281,23 @@ def launch(name: str,
                 value /= 1000  # The SDK string parser converts GB to MB.
             clauses.append(f'{field} {operator} {json.dumps(value)}')
     query_str = ' '.join(clauses)
+    excluded = _excluded_hosts(excluded_hosts)
     instance_list = vast.vast().search_offers(
         query=query_str,
         type='bid' if preemptible else 'on-demand',
         storage=required_disk,
         order='dph_total')
     candidates = []
+    skipped_hosts: set = set()
     bid = (create_instance_kwargs or {}).get('bid_price')
     if bid is None:
         bid = (create_instance_kwargs or {}).get('price')
     for offer in instance_list if isinstance(instance_list, list) else []:
         if not isinstance(offer, dict) or not _offer_matches(offer, query):
+            continue
+        host = _host_id(offer)
+        if excluded and (host is None or host in excluded):
+            skipped_hosts.add(host)
             continue
         try:
             price = _offer_price(offer, preemptible, required_disk, bid)
@@ -279,12 +306,26 @@ def launch(name: str,
         except (KeyError, TypeError, ValueError):
             continue
         candidates.append((price, offer))
+    if skipped_hosts:
+        logger.info('Vast offers skipped from excluded hosts: '
+                    f'{sorted(skipped_hosts, key=str)}')
     if not candidates:
         raise RuntimeError('No matching Vast offer with a verifiable price '
-                           f'satisfies the requirements: {query}. '
-                           'No instance was created.')
+                           f'satisfies the requirements: {query}'
+                           + (f', excluding hosts {sorted(excluded)}'
+                              if excluded else '') +
+                           '. No instance was created.')
     actual_price, instance_touse = min(candidates, key=lambda item: item[0])
+    offer_identity = {
+        'offer': str(instance_touse['id']),
+        'host_id': _host_id(instance_touse),
+        'machine_id': instance_touse.get('machine_id'),
+        'geolocation': instance_touse.get('geolocation'),
+        'hourly': round(actual_price, 6),
+    }
     logger.info(f'Vast offer {instance_touse["id"]}: {gpu_name} x{count}, '
+                f'host {offer_identity["host_id"]}, '
+                f'machine {offer_identity["machine_id"]}, '
                 f'{instance_touse["geolocation"]}, '
                 f'${actual_price:.4f}/hour including allocated disk '
                 f'(catalog estimate ${estimated_price:.4f}/hour; '
@@ -427,7 +468,7 @@ def launch(name: str,
                            'availability.')
 
     instance_id = str(new_instance_contract['new_contract'])
-    journal.created(name, instance_id)
+    journal.created(name, instance_id, offer_identity)
     return instance_id
 
 

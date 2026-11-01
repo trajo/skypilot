@@ -2404,6 +2404,14 @@ def get_config_schema():
                     'type': 'integer',
                     'minimum': 1
                 },
+                'excluded_hosts': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'integer',
+                        'minimum': 1
+                    },
+                    'uniqueItems': True,
+                },
                 'max_hourly_cost': {
                     'type': 'number',
                     'exclusiveMinimum': 0,

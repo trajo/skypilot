@@ -441,3 +441,69 @@ def test_single_creation_limit_survives_cleanup(sdk, monkeypatch, tmp_path):
                        match='creation limit'):
         launch(name='cloud-head', max_instance_creations=1)
     assert sdk.create_instance.call_count == 1
+
+
+def test_excluded_hosts_skip_to_next_cheapest(sdk, offer):
+    bad = dict(offer, id=1, host_id=213498, dph_total=0.20)
+    good = dict(offer, id=2, host_id=7, machine_id=70, dph_total=0.30)
+    sdk.search_offers.return_value = [bad, good]
+    launch(excluded_hosts=[213498])
+    assert sdk.create_instance.call_args.kwargs['id'] == 2
+    launch()
+    assert sdk.create_instance.call_args.kwargs['id'] == 1
+
+
+def test_excluded_hosts_fail_closed_without_host_id(sdk, offer):
+    sdk.search_offers.return_value = [dict(offer, id=1)]
+    with pytest.raises(RuntimeError, match='excluding hosts'):
+        launch(excluded_hosts=[5])
+    sdk.create_instance.assert_not_called()
+
+
+@pytest.mark.parametrize('hosts', [[0], ['5'], [True], 5])
+def test_invalid_excluded_hosts(sdk, hosts):
+    with pytest.raises(ValueError, match='excluded_hosts'):
+        launch(excluded_hosts=hosts)
+    sdk.create_instance.assert_not_called()
+
+
+def test_excluded_hosts_config_schema_and_task_override():
+    from sky import Task
+    jsonschema.validate({'vast': {'excluded_hosts': [1, 2]}},
+                        schemas.get_config_schema())
+    for bad in ([1, 1], [0], ['1']):
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate({'vast': {'excluded_hosts': bad}},
+                                schemas.get_config_schema())
+    task = Task.from_yaml_config({
+        'resources': {
+            'infra': 'vast',
+            'accelerators': 'RTX3090'
+        },
+        'config': {
+            'vast': {
+                'excluded_hosts': [213498]
+            }
+        }
+    })
+    assert next(iter(task.resources)
+               ).cluster_config_overrides['vast']['excluded_hosts'] == [213498]
+    assert ('vast',
+            'excluded_hosts') in constants.OVERRIDEABLE_CONFIG_KEYS_IN_TASK
+
+
+def test_journal_records_offer_host(sdk, offer, monkeypatch, tmp_path):
+    from sky.provision.vast import journal
+    monkeypatch.setattr(journal, 'ROOT', tmp_path)
+    journal.register('display', 'cloud')
+    sdk.search_offers.return_value = [
+        dict(offer, host_id=134292, machine_id=147034)
+    ]
+    launch(name='cloud-head')
+    assert journal.read('cloud')['offers']['456'] == {
+        'offer': '123',
+        'host_id': 134292,
+        'machine_id': 147034,
+        'geolocation': 'Bucharest, RO',
+        'hourly': 0.25
+    }

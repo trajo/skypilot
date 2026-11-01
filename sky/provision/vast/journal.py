@@ -77,10 +77,13 @@ def creating(label, max_instance_creations=None):
         write(value)
 
 
-def created(label, instance_id):
+def created(label, instance_id, offer=None):
     value = read(label.rsplit('-', 1)[0])
     if value is not None:
         value['ids'].append(str(instance_id))
+        if offer is not None:
+            # Which host each instance came from, for excluding bad hosts.
+            value.setdefault('offers', {})[str(instance_id)] = offer
         value['pending'] = None
         write(value)
 

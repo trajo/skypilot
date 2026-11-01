@@ -151,6 +151,8 @@ def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
                         'max_hourly_cost'),
                     max_instance_creations=config.provider_config.get(
                         'max_instance_creations'),
+                    excluded_hosts=config.provider_config.get(
+                        'excluded_hosts'),
                 )
             except Exception as e:  # pylint: disable=broad-except
                 logger.warning(f'run_instances error: {e}')
