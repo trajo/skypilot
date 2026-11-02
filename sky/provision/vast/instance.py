@@ -14,6 +14,13 @@ from sky.utils import status_lib
 from sky.utils import ux_utils
 
 POLL_INTERVAL = 10
+# Image pulls of large images on slow hosts can take many minutes; resuming a
+# loaded instance with a winning bid takes seconds.
+LOADING_TIMEOUT = 30 * 60
+RESUME_TIMEOUT = 5 * 60
+# How often one provisioning call wins back outbid instances before it gives
+# up on their machines and fails over.
+MAX_REBIDS = 2
 
 logger = sky_logging.init_logger(__name__)
 # a much more convenient method
@@ -39,6 +46,16 @@ def _filter_instances(cluster_name_on_cloud: str,
         if instance.get('name') in possible_names:
             filtered_instances[instance_id] = instance
     return filtered_instances
+
+
+def _paused(instance: Dict[str, Any]) -> bool:
+    """Whether Vast will not run the instance until it is started again.
+
+    Vast stops an outbid interruptible instance exactly as a user stop does,
+    also while its image is still loading: intended_status becomes 'stopped'.
+    """
+    return (instance.get('intended_status') == 'stopped' or
+            instance['status'] in ('EXITED', 'STOPPED'))
 
 
 def _get_head_instance_id(instances: Dict[str, Any]) -> Optional[str]:
@@ -88,24 +105,55 @@ def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
     created_instance_ids = []
     instances: Dict[str, Any] = {}
 
+    deadline = time.time() + LOADING_TIMEOUT
     while True:
         instances = _filter_instances(cluster_name_on_cloud, None)
-        if not status_filter(instances, pending_status):
+        pending = [
+            inst_id for inst_id, inst in status_filter(
+                instances, pending_status).items() if not _paused(inst)
+        ]
+        if not pending:
             break
+        if time.time() > deadline:
+            raise RuntimeError(f'Vast instances {sorted(pending)} are still '
+                               f'pending after {LOADING_TIMEOUT // 60} min.')
         logger.info(f'Waiting for {len(instances)} instances to be ready.')
         time.sleep(POLL_INTERVAL)
 
-    running_instances = status_filter(instances, ['RUNNING'])
+    stopped_instances = {k: v for k, v in instances.items() if _paused(v)}
+    running_instances = {
+        k: v
+        for k, v in status_filter(instances, ['RUNNING']).items()
+        if k not in stopped_instances
+    }
     head_instance_id = _get_head_instance_id(running_instances)
-    stopped_instances = status_filter(instances, ['EXITED', 'STOPPED'])
     if len(running_instances) + len(stopped_instances) != len(instances):
         raise RuntimeError(
             'Vast instances have unresolved states; refusing duplicate creation'
         )
 
+    user_bid = any(
+        key in (create_instance_kwargs or {}) for key in ('price', 'bid_price'))
+    limit: List[float] = []
+
+    def resume(instance: Dict[str, Any]) -> None:
+        # A user-specified bid is kept; otherwise outbid instances are won
+        # back up to the same hourly limit that governs new rentals.
+        if instance.get('is_bid') and not user_bid:
+            if not limit:
+                limit.append(
+                    utils.hourly_limit(
+                        config.node_config['InstanceType'], True, region,
+                        config.provider_config.get('max_price_multiplier', 2.0),
+                        config.provider_config.get('max_hourly_cost'))[0])
+            utils.rebid_to_win(instance, limit[0])
+        utils.start(instance['id'])
+
+    ready_timeout = LOADING_TIMEOUT
     if config.resume_stopped_nodes and stopped_instances:
         for instance in stopped_instances.values():
-            utils.start(instance['id'])
+            resume(instance)
+        ready_timeout = RESUME_TIMEOUT
     else:
         to_start_count = config.count - (len(running_instances) +
                                          len(stopped_instances))
@@ -163,18 +211,41 @@ def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
             if head_instance_id is None:
                 head_instance_id = instance_id
 
-    # Wait for instances to be ready.
+    # Wait for instances to be ready, winning back outbid ones a few times.
+    deadline = time.time() + ready_timeout
+    last_start = time.time()
+    rebids = 0
     while True:
-        instances = _filter_instances(cluster_name_on_cloud, ['RUNNING'])
-        ready_instance_cnt = 0
-        for instance_id, instance in instances.items():
-            if instance.get('ssh_port') is not None:
-                ready_instance_cnt += 1
+        instances = _filter_instances(cluster_name_on_cloud, None)
+        ready = {
+            k: v for k, v in instances.items() if v['status'] == 'RUNNING' and
+            not _paused(v) and v.get('ssh_port') is not None
+        }
         logger.info('Waiting for instances to be ready: '
-                    f'({ready_instance_cnt}/{config.count}).')
-        if ready_instance_cnt == config.count:
+                    f'({len(ready)}/{config.count}).')
+        if len(ready) == config.count:
+            instances = ready
             break
-
+        # A start takes a moment to show; later stops are new outbids.
+        paused = [
+            v for v in instances.values()
+            if _paused(v) and time.time() - last_start > 2 * POLL_INTERVAL
+        ]
+        if paused:
+            if rebids >= MAX_REBIDS:
+                raise RuntimeError(
+                    f'Vast instances {sorted(v["id"] for v in paused)} were '
+                    f'stopped again after {rebids} rebids; failing over.')
+            rebids += 1
+            for instance in paused:
+                resume(instance)
+            last_start = time.time()
+            # Vast keeps loading the image while an instance is stopped.
+            deadline = max(deadline, last_start + RESUME_TIMEOUT)
+        elif time.time() > deadline:
+            raise RuntimeError(
+                f'Vast instances of {cluster_name_on_cloud} are not ready '
+                f'({len(ready)}/{config.count}) within the wait limit.')
         time.sleep(POLL_INTERVAL)
 
     head_instance_id = _get_head_instance_id(instances)
@@ -336,6 +407,9 @@ def query_instances(
                               Optional[str]]] = {}
     for inst_id, inst in instances.items():
         status = status_map.get(inst['status'], status_lib.ClusterStatus.INIT)
+        if inst['status'] != 'RUNNING' and _paused(inst):
+            # Outbid while loading: Vast will not run it until restarted.
+            status = status_lib.ClusterStatus.STOPPED
         if non_terminated_only and status is None:
             continue
         statuses[inst_id] = (status, None)

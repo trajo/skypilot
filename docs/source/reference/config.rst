@@ -3167,6 +3167,13 @@ price limit. It refuses creation if the live price exceeds the greater of
 ``estimate * max_price_multiplier`` and ``estimate + $0.10/hour``.
 Metered network traffic is additional. For interruptible instances, the live
 price uses the configured bid (or the offer's minimum bid) plus allocated disk.
+Vast refuses a bid that only equals a minimum already held by another bid;
+SkyPilot then retries once just above the machine's current listing. When
+SkyPilot resumes an outbid instance (for example, during managed job recovery
+with the ``FAILOVER`` strategy), it first raises the bid just above the
+competing one. Both stay within this price limit (or ``vast.max_hourly_cost``
+when set); otherwise SkyPilot gives up the machine and fails over. A bid set in
+``create_instance_kwargs`` is never raised.
 If a historical spot catalog has a zero estimate, the guard uses the on-demand
 catalog price as its reference and logs a warning.
 This setting can be overridden per task via :ref:`config flag <config-client-cli-flag>`.

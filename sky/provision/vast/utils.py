@@ -10,7 +10,7 @@ import math
 from pathlib import Path
 import re
 import shlex
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sky import catalog
 from sky import exceptions
@@ -19,6 +19,11 @@ from sky.adaptors import vast
 from sky.provision.vast import journal
 
 logger = sky_logging.init_logger(__name__)
+
+# A bid must clear the listed minimum by this fraction, and by at least the
+# step in dollars per hour.
+_BID_STEP_FRACTION = 0.05
+_MIN_BID_STEP = 0.002
 
 # Country groups used by Vast's georegion directive (vastai/utils.py).
 _GEOREGIONS = {
@@ -108,6 +113,44 @@ def _offer_price(offer: Dict[str, Any], preemptible: bool, disk_size: float,
     if not math.isfinite(price) or price < 0:
         raise ValueError('Invalid Vast offer price')
     return price
+
+
+def hourly_limit(instance_type: str, preemptible: bool, region: str,
+                 max_price_multiplier: float,
+                 max_hourly_cost: Optional[float]) -> Tuple[float, float]:
+    """Return (hourly limit, catalog estimate) for rental plus allocated disk.
+
+    The limit applies to new rentals and to rebids of outbid instances alike.
+    """
+    if not math.isfinite(max_price_multiplier) or max_price_multiplier < 1:
+        raise ValueError('vast.max_price_multiplier must be finite and >= 1.')
+    estimated_price = catalog.get_hourly_cost(instance_type,
+                                              preemptible,
+                                              region,
+                                              None,
+                                              clouds='vast')
+    # Historical chunked catalogs rounded all minimum bids down to zero.
+    # Keep spot usable with a conservative on-demand reference in that case.
+    if preemptible and estimated_price == 0:
+        estimated_price = catalog.get_hourly_cost(instance_type,
+                                                  False,
+                                                  region,
+                                                  None,
+                                                  clouds='vast')
+        logger.warning('Vast spot catalog estimate is zero; using the '
+                       'on-demand catalog price as the price guard reference.')
+    if not math.isfinite(estimated_price) or estimated_price < 0:
+        raise RuntimeError('Cannot verify the Vast catalog price estimate.')
+    if max_hourly_cost is not None:
+        if (isinstance(max_hourly_cost, bool) or
+                not math.isfinite(max_hourly_cost) or max_hourly_cost <= 0):
+            raise ValueError(
+                'vast.max_hourly_cost must be finite and positive.')
+        # An explicit absolute cap replaces the relative catalog guard. It
+        # includes the exact requested disk.
+        return max_hourly_cost, estimated_price
+    return (max(estimated_price * max_price_multiplier,
+                estimated_price + 0.10), estimated_price)
 
 
 def list_instances() -> Dict[str, Dict[str, Any]]:
@@ -240,36 +283,9 @@ def launch(name: str,
     }
     if secure_only:
         query['hosting_type'] = {'gte': 1}
-    if not math.isfinite(max_price_multiplier) or max_price_multiplier < 1:
-        raise ValueError('vast.max_price_multiplier must be finite and >= 1.')
-    estimated_price = catalog.get_hourly_cost(instance_type,
-                                              preemptible,
-                                              region,
-                                              None,
-                                              clouds='vast')
-    # Historical chunked catalogs rounded all minimum bids down to zero.
-    # Keep spot usable with a conservative on-demand reference in that case.
-    if preemptible and estimated_price == 0:
-        estimated_price = catalog.get_hourly_cost(instance_type,
-                                                  False,
-                                                  region,
-                                                  None,
-                                                  clouds='vast')
-        logger.warning('Vast spot catalog estimate is zero; using the '
-                       'on-demand catalog price as the price guard reference.')
-    if not math.isfinite(estimated_price) or estimated_price < 0:
-        raise RuntimeError('Cannot verify the Vast catalog price estimate.')
-    if max_hourly_cost is not None:
-        if (isinstance(max_hourly_cost, bool) or
-                not math.isfinite(max_hourly_cost) or max_hourly_cost <= 0):
-            raise ValueError(
-                'vast.max_hourly_cost must be finite and positive.')
-        # An explicit absolute cap replaces the relative catalog guard. It
-        # includes the exact requested disk passed to search_offers below.
-        price_limit = max_hourly_cost
-    else:
-        price_limit = max(estimated_price * max_price_multiplier,
-                          estimated_price + 0.10)
+    price_limit, estimated_price = hourly_limit(instance_type, preemptible,
+                                                region, max_price_multiplier,
+                                                max_hourly_cost)
     # Both legacy and current SDKs accept strings. Without georegion/chunked
     # directives, the current SDK preserves quoted names, lists and decimals.
     clauses = []
@@ -465,20 +481,29 @@ def launch(name: str,
     launch_params.setdefault('ssh', True)
     launch_params.setdefault('direct', True)
     launch_params.setdefault('cancel_unavail', True)
-    journal.creating(name, max_instance_creations)
     # Legacy SDKs keep their own retry behaviour, so their errors stay
     # unresolved; current SDKs create through a single-attempt client.
     single_attempt = api_client is not sdk
     creator = vast.create_sdk() if single_attempt else sdk
     try:
-        new_instance_contract = creator.create_instance(**launch_params)
+        new_instance_contract = _create(creator, launch_params, name,
+                                        max_instance_creations, single_attempt)
     except Exception as e:  # pylint: disable=broad-except
         status = getattr(getattr(e, 'response', None), 'status_code', None)
-        if single_attempt and isinstance(status, int) and 400 <= status < 500:
-            # The provider refused this single request (e.g. 410 Gone when
-            # another renter took the offer): no instance exists.
-            journal.rejected(name, status)
-        raise
+        retry_bid = None
+        if single_attempt and preemptible and bid is None and status == 410:
+            retry_bid = _bid_after_refusal(instance_touse, required_disk,
+                                           price_limit)
+        if retry_bid is None:
+            raise
+        logger.info(f'Vast refused bid ${launch_params["price"]:.4f}/hour '
+                    f'for offer {instance_touse["id"]}; retrying once at '
+                    f'${retry_bid:.4f}/hour.')
+        launch_params['price'] = retry_bid
+        offer_identity['hourly'] = round(
+            _offer_price(instance_touse, True, required_disk, retry_bid), 6)
+        new_instance_contract = _create(creator, launch_params, name,
+                                        max_instance_creations, single_attempt)
     if (not isinstance(new_instance_contract, dict) or
             isinstance(new_instance_contract.get('new_contract'), bool) or
             not str(new_instance_contract.get('new_contract', '')).isdigit()):
@@ -489,6 +514,117 @@ def launch(name: str,
     instance_id = str(new_instance_contract['new_contract'])
     journal.created(name, instance_id, offer_identity)
     return instance_id
+
+
+def _create(creator: Any, launch_params: Dict[str, Any], name: str,
+            max_instance_creations: Optional[int], single_attempt: bool) -> Any:
+    journal.creating(name, max_instance_creations)
+    try:
+        return creator.create_instance(**launch_params)
+    except Exception as e:  # pylint: disable=broad-except
+        status = getattr(getattr(e, 'response', None), 'status_code', None)
+        if single_attempt and isinstance(status, int) and 400 <= status < 500:
+            # The provider refused this single request (e.g. 410 Gone when
+            # another renter took the offer): no instance exists.
+            journal.rejected(name, status)
+        raise
+
+
+def _bid_over(listed_bid: float) -> float:
+    """A bid that clears a listed minimum bid by a small margin.
+
+    Vast refuses a bid that only equals the listed minimum when another bid
+    holds that price. The margin also leaves less room for the next bidder.
+    """
+    bid = listed_bid + max(_MIN_BID_STEP, listed_bid * _BID_STEP_FRACTION)
+    # Round up to $0.0001; round first so float noise cannot add a step.
+    return math.ceil(round(bid * 10000, 6)) / 10000
+
+
+def machine_listing(machine_id: Any,
+                    disk_size: float) -> Optional[Dict[str, Any]]:
+    """The machine's interruptible listing, rented or not, if it has one.
+
+    While another renter outbids us, the listing shows the bid to beat.
+    """
+    if isinstance(machine_id, bool) or not isinstance(machine_id, int):
+        return None
+    offers = vast.vast().search_offers(
+        query=f'machine_id={machine_id} rented=any rentable=any',
+        type='bid',
+        storage=disk_size)
+    for offer in offers if isinstance(offers, list) else []:
+        if (isinstance(offer, dict) and
+                offer.get('machine_id') == machine_id and
+                offer.get('min_bid') is not None):
+            return offer
+    return None
+
+
+def _bid_after_refusal(offer: Dict[str, Any], disk_size: float,
+                       limit: float) -> Optional[float]:
+    """A bid over the machine's current listing, within the hourly limit.
+
+    Vast answers a bid that does not clear the machine's current price with
+    the same 410 no_such_ask as a vanished offer. None when the machine is no
+    longer listed or the bid with disk would exceed the limit.
+    """
+    try:
+        listing = machine_listing(offer.get('machine_id'), disk_size)
+        if listing is None:
+            return None
+        to_beat = max(float(listing['min_bid']), float(offer['min_bid']))
+        retry_bid = _bid_over(to_beat)
+        hourly = _offer_price(dict(listing, min_bid=to_beat), True, disk_size,
+                              retry_bid)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.debug(f'No retry bid for Vast offer {offer.get("id")}: {e}')
+        return None
+    if hourly > limit:
+        logger.info(f'Vast offer {offer.get("id")} needs a bid over '
+                    f'${to_beat:.4f}/hour; ${hourly:.4f}/hour with disk '
+                    f'exceeds the ${limit:.4f}/hour limit.')
+        return None
+    return retry_bid
+
+
+def rebid_to_win(instance: Dict[str, Any], limit: float) -> None:
+    """Raise a stopped interruptible instance's bid over its machine's price.
+
+    Vast stops an outbid instance exactly as a user stop does and does not
+    run it again by itself; a bid over the listed price followed by a start
+    does. Raises RuntimeError, so the provisioner tears down and fails over,
+    when winning the machine back would exceed the hourly limit for rental
+    plus disk. Without a listing (machine rented on demand, offline or
+    delisted) the bid is left as is and only the start is attempted.
+    """
+    instance_id = str(instance['id'])
+    try:
+        current = float(instance['dph_base'])
+        disk_hourly = float(instance['dph_total']) - current
+        listing = machine_listing(instance.get('machine_id'),
+                                  float(instance.get('disk_space') or 1))
+    except (KeyError, TypeError, ValueError) as e:
+        raise RuntimeError(
+            f'Cannot read the bid of Vast instance {instance_id}.') from e
+    if listing is None:
+        logger.info(f'Vast instance {instance_id}: its machine is not listed '
+                    'for bids; starting it without a rebid.')
+        return
+    to_beat = float(listing['min_bid'])
+    if current >= to_beat:
+        return
+    new_bid = _bid_over(to_beat)
+    if new_bid + disk_hourly > limit:
+        raise RuntimeError(
+            f'Vast instance {instance_id} was outbid: winning its machine back '
+            f'needs a bid over ${to_beat:.4f}/hour, '
+            f'${new_bid + disk_hourly:.4f}/hour with disk, over the '
+            f'${limit:.4f}/hour limit.')
+    logger.info(f'Vast instance {instance_id} was outbid at ${current:.4f}/'
+                f'hour; rebidding ${new_bid:.4f}/hour (limit ${limit:.4f}/hour '
+                'with disk).')
+    vast.vast().change_bid(id=int(instance_id), price=new_bid)
 
 
 def start(instance_id: str) -> None:
