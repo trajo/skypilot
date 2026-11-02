@@ -268,6 +268,33 @@ def test_no_rebid_when_already_highest(sdk):
     sdk.change_bid.assert_not_called()
 
 
+def test_highest_bid_still_within_the_limit(sdk):
+    # No rebid is needed, but the instance itself now costs more than the
+    # limit allows (for example after the limit was lowered).
+    sdk.search_offers.return_value = [{'machine_id': 36512, 'min_bid': 0.3}]
+    with pytest.raises(RuntimeError, match='over the \\$0.4000/hour limit'):
+        utils.rebid_to_win(outbid(dph_base=0.45, dph_total=0.46), limit=0.4)
+    sdk.change_bid.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    'changes,listed',
+    [
+        # Reviewer reproduction: dph_total NaN made the disk part NaN, the
+        # limit comparison false, and a $0.525 bid passed a $0.40 limit.
+        (dict(dph_base=0.3, dph_total=float('nan')), 0.5),
+        (dict(dph_base=0.3, dph_total=0.2), 0.5),  # negative disk part
+        (dict(dph_base=float('inf'), dph_total=float('inf')), 0.5),
+        (dict(dph_base=0.3, dph_total=0.31), float('nan')),
+        (dict(dph_base=0.3, dph_total=0.31), -1.0),
+    ])
+def test_unverifiable_prices_fail_closed(sdk, changes, listed):
+    sdk.search_offers.return_value = [{'machine_id': 36512, 'min_bid': listed}]
+    with pytest.raises(RuntimeError, match='Cannot verify'):
+        utils.rebid_to_win(outbid(**changes), limit=0.4)
+    sdk.change_bid.assert_not_called()
+
+
 @pytest.mark.parametrize('listing', [[], [{'machine_id': 1, 'min_bid': .01}]])
 def test_unlisted_machine_fails_over_at_once(sdk, listing):
     # Observed 2026-11-02: with the machine no longer listed for bids (taken
@@ -395,6 +422,60 @@ def test_rebid_over_limit_fails_over(monkeypatch, clock, provider):
     with pytest.raises(RuntimeError, match='over the limit'):
         instance.run_instances('RO', 'display', 'cloud', config())
     provider.start.assert_not_called()
+
+
+def test_restart_waits_until_the_container_has_stopped(monkeypatch, clock,
+                                                       provider):
+    # Stopped (outbid or by its user) while the container still runs: a start
+    # now would cancel the stop and keep the previous workload alive.
+    stopping = {'123': vm(intended_status='stopped')}
+    stopped = {'123': vm(status='EXITED', intended_status='stopped')}
+    states = [stopping, stopping, stopping, stopped, {'123': vm()}]
+    seen, at_start = [], []
+
+    def answer():
+        state = states.pop(0) if len(states) > 1 else states[0]
+        seen.append(state['123']['status'])
+        return {k: dict(v) for k, v in state.items()}
+
+    monkeypatch.setattr(utils, 'list_instances', answer)
+    provider.start.side_effect = lambda _: at_start.append(list(seen))
+    record = instance.run_instances('RO', 'display', 'cloud', config())
+    assert record.head_instance_id == '123'
+    provider.start.assert_called_once_with('123')
+    assert at_start == [['RUNNING', 'RUNNING', 'RUNNING', 'EXITED']]
+    # Rebids are decided on the stopped instance's fresh prices.
+    assert provider.rebid.call_args.args[0]['status'] == 'EXITED'
+    assert clock.now - 1000 >= 2 * instance.POLL_INTERVAL
+
+
+def test_restart_refused_while_the_container_keeps_running(
+        monkeypatch, clock, provider):
+    inventory(monkeypatch, {'123': vm(intended_status='stopped')})
+    with pytest.raises(RuntimeError, match='previous workload may still run'):
+        instance.run_instances('RO', 'display', 'cloud', config())
+    provider.rebid.assert_not_called()
+    provider.start.assert_not_called()
+    assert clock.now - 1000 >= instance.STOP_TIMEOUT
+
+
+@pytest.mark.parametrize('api_key_on_instance,restarted', [(True, True),
+                                                           (False, False)])
+def test_instance_with_key_in_onstart_is_not_restarted_under_no_upload(
+        monkeypatch, clock, provider, api_key_on_instance, restarted):
+    del clock
+    legacy = vm(status='EXITED',
+                intended_status='stopped',
+                onstart='touch ~/.no_auto_tmux;echo "k" > ~/.vast_api_key')
+    inventory(monkeypatch, {'123': legacy}, {'123': vm()})
+    cfg = config(api_key_on_instance=api_key_on_instance)
+    if restarted:
+        instance.run_instances('RO', 'display', 'cloud', cfg)
+        provider.start.assert_called_once_with('123')
+    else:
+        with pytest.raises(RuntimeError, match='not restarted'):
+            instance.run_instances('RO', 'display', 'cloud', cfg)
+        provider.start.assert_not_called()
 
 
 def test_resumed_instance_wait_is_bounded(monkeypatch, clock, provider):

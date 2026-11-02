@@ -14,12 +14,14 @@ from sky import clouds
 from sky import resources as resources_lib
 from sky import skypilot_config
 from sky.adaptors import vast as vast_adaptor
+from sky.backends import backend_utils
 from sky.provision.vast import journal
 from sky.provision.vast import utils
 from sky.skylet import constants
 from sky.utils import common_utils
 from sky.utils import resources_utils
 from sky.utils import schemas
+from sky.utils import yaml_utils
 
 
 @pytest.fixture(name='offer')
@@ -576,8 +578,35 @@ def test_template_carries_api_key_setting(api_key_on_instance):
         max_hourly_cost=None,
         api_key_on_instance=api_key_on_instance)
     provider_section = rendered.split('auth:')[0]
-    assert ('api_key_on_instance: false'
-            in provider_section) is (not api_key_on_instance)
+    expected = 'true' if api_key_on_instance else 'false'
+    assert f'api_key_on_instance: {expected}\n' in provider_section
+
+
+@pytest.mark.parametrize('old_policy', [None, True, False])
+@pytest.mark.parametrize('new_policy', [True, False])
+def test_relaunch_keeps_the_current_api_key_policy(old_policy, new_policy):
+    # Relaunching an existing cluster restores its old provider block; the
+    # credential policy must still be today's (reviewer reproduction: a
+    # NO_UPLOAD relaunch of an older cluster dropped `false`).
+    old_provider = {'type': 'external', 'module': 'sky.provision.vast'}
+    if old_policy is not None:
+        old_provider['api_key_on_instance'] = old_policy
+    old = {'cluster_name': 'c', 'provider': old_provider}
+    new = {
+        'cluster_name': 'c',
+        'provider': {
+            'type': 'external',
+            'module': 'sky.provision.vast',
+            'api_key_on_instance': new_policy
+        }
+    }
+    restored = backend_utils._replace_yaml_dicts(  # pylint: disable=protected-access
+        yaml_utils.dump_yaml_str(new),
+        yaml_utils.dump_yaml_str(old),
+        backend_utils._RAY_YAML_KEYS_TO_RESTORE_FOR_BACK_COMPATIBILITY,  # pylint: disable=protected-access
+        backend_utils._RAY_YAML_KEYS_TO_RESTORE_EXCEPTIONS)  # pylint: disable=protected-access
+    provider = yaml_utils.safe_load(restored)['provider']
+    assert provider['api_key_on_instance'] is new_policy
 
 
 def test_vast_remote_identity_config_schema():

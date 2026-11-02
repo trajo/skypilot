@@ -21,6 +21,14 @@ RESUME_TIMEOUT = 5 * 60
 # How often one provisioning call wins back outbid instances before it gives
 # up on their machines and fails over.
 MAX_REBIDS = 2
+# How long a stopped instance's container may take to actually stop (observed
+# 10-15 s) before it is restarted.
+STOP_TIMEOUT = 2 * 60
+# Container states in which an instance's previous workload is certainly not
+# running: stopped, or not started since its image was loaded.
+_NOT_RUNNING = ('EXITED', 'STOPPED', 'CREATED', 'LOADING')
+# Written by the start command of instances created with the account API key.
+_API_KEY_FILE = '.vast_api_key'
 
 logger = sky_logging.init_logger(__name__)
 # a much more convenient method
@@ -56,6 +64,31 @@ def _paused(instance: Dict[str, Any]) -> bool:
     """
     return (instance.get('intended_status') == 'stopped' or
             instance['status'] in ('EXITED', 'STOPPED'))
+
+
+def _await_stop(instance: Dict[str, Any]) -> Dict[str, Any]:
+    """Wait until a paused instance's container has stopped; return it fresh.
+
+    Starting an instance whose stop is still pending makes Vast drop the stop:
+    the container, with the previous workload, keeps running while a new one
+    is submitted. Raises, so the cluster is torn down instead, when the
+    container does not stop in time.
+    """
+    deadline = time.time() + STOP_TIMEOUT
+    while instance['status'] not in _NOT_RUNNING:
+        if time.time() > deadline:
+            raise RuntimeError(
+                f'Vast instance {instance["id"]} is still '
+                f'{instance["status"].lower()} {STOP_TIMEOUT // 60} min after '
+                'it was stopped; not restarting it while its previous '
+                'workload may still run.')
+        time.sleep(POLL_INTERVAL)
+        current = utils.list_instances().get(instance['id'])
+        if current is None:
+            raise RuntimeError(
+                f'Vast instance {instance["id"]} disappeared while stopping.')
+        instance = current
+    return instance
 
 
 def _get_head_instance_id(instances: Dict[str, Any]) -> Optional[str]:
@@ -135,8 +168,27 @@ def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
     user_bid = any(
         key in (create_instance_kwargs or {}) for key in ('price', 'bid_price'))
     limit: List[float] = []
+    api_key_on_instance = config.provider_config.get('api_key_on_instance',
+                                                     True)
+    if not api_key_on_instance:
+        exposed = sorted(k for k, v in running_instances.items()
+                         if _API_KEY_FILE in str(v.get('onstart') or ''))
+        if exposed:
+            logger.warning(
+                f'Vast instances {exposed} were created with the account API '
+                'key on their host; vast.remote_identity: NO_UPLOAD applies '
+                'only to new instances. Recreate them and rotate the key.')
 
     def resume(instance: Dict[str, Any]) -> None:
+        if (not api_key_on_instance and
+                _API_KEY_FILE in str(instance.get('onstart') or '')):
+            # Its start command would write the key to the host again.
+            raise RuntimeError(
+                f'Vast instance {instance["id"]} was created with the account '
+                'API key in its start command, so it is not restarted under '
+                'vast.remote_identity: NO_UPLOAD; the cluster fails over to a '
+                'new instance. Rotate the key if the host is untrusted.')
+        instance = _await_stop(instance)
         # A user-specified bid is kept; otherwise outbid instances are won
         # back up to the same hourly limit that governs new rentals.
         if instance.get('is_bid') and not user_bid:
@@ -409,7 +461,8 @@ def query_instances(
         status = status_map.get(inst['status'], status_lib.ClusterStatus.INIT)
         if _paused(inst):
             # Outbid or stopped, also while loading or still shutting down:
-            # Vast will not run it again until it is started.
+            # Vast will not run it again until it is started. A restart
+            # first waits for the container to stop (_await_stop).
             status = status_lib.ClusterStatus.STOPPED
         if non_terminated_only and status is None:
             continue

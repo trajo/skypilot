@@ -214,6 +214,10 @@ _RAY_YAML_KEYS_TO_RESTORE_EXCEPTIONS = [
     # we need to take this field from the new yaml.
     ('provider', 'tpu_node'),
     ('provider', 'security_group', 'GroupName'),
+    # Vast credential policy (vast.remote_identity): the current setting must
+    # govern new instances of an existing cluster, never the one it had when
+    # first launched (which would put the account key back on hosts).
+    ('provider', 'api_key_on_instance'),
     ('available_node_types', 'ray.head.default', 'node_config',
      'IamInstanceProfile'),
     ('available_node_types', 'ray.head.default', 'node_config', 'UserData'),

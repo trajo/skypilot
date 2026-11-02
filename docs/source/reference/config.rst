@@ -3220,8 +3220,27 @@ A dry run still shows catalog estimates; it does not reserve a live offer.
 ``NO_UPLOAD`` keeps local credential files off every cluster (as for other
 clouds) and also stops SkyPilot from writing the Vast account API key to
 ``~/.vast_api_key`` on Vast instances, where the host operator can read it.
-On-instance Vast API calls, such as autostop, then cannot authenticate; managed
-jobs are torn down by their controller and are unaffected.
+The setting governs new instances, also of existing clusters; a stopped
+instance that was created with the key is not restarted (its cluster fails
+over to a new instance), and a running one keeps the key until it is
+recreated. Rotate the key if it reached untrusted hosts.
+
+This is a trade-off. Without the key, nothing on the instance can stop or
+terminate it: autostop and autodown do nothing, including the 10-minute
+autodown that SkyPilot sets on every managed-job cluster as a safety net in
+case the jobs controller dies. Managed jobs are still torn down by their
+controller when they finish, fail or are cancelled; but if the controller
+(the API server in consolidation mode) is lost, their instances keep billing
+until an operator terminates them. With the default ``LOCAL_CREDENTIALS``, the
+instance can terminate itself, and every host operator can use the account
+key (create, stop or destroy any instance on the account, spend its credit).
+With ``NO_UPLOAD``, monitor for instances that outlive their jobs from outside
+the rented hosts (for example by listing the account's instances against the
+cluster labels SkyPilot assigns) and keep the prepaid credit bounded.
+
+Storage-only credentials (R2, CoreWeave, VastData, Hugging Face) are not
+covered by any ``remote_identity``; see :ref:`provision.storage_credentials
+<config-yaml-provision-storage-credentials>`.
 
 Default: ``LOCAL_CREDENTIALS``
 

@@ -658,24 +658,47 @@ def rebid_to_win(instance: Dict[str, Any], limit: float) -> None:
     plus disk, or when the machine is no longer listed for bids at all
     (rented on demand, offline or delisted): a start cannot succeed then
     (observed 2026-11-02: three starts over 66 s, all stopped again). A
-    machine whose instance was only stopped stays listed as rented.
+    machine whose instance was only stopped stays listed as rented. Every
+    price part must be finite and nonnegative, and the instance's price with
+    disk stays within the limit also when no rebid is needed (fail closed).
     """
     instance_id = str(instance['id'])
     try:
         current = float(instance['dph_base'])
         disk_hourly = float(instance['dph_total']) - current
-        listing = machine_listing(instance.get('machine_id'),
-                                  float(instance.get('disk_space') or 1))
+        limit = float(limit)
+        disk_size = float(instance.get('disk_space') or 1)
     except (KeyError, TypeError, ValueError) as e:
         raise RuntimeError(
             f'Cannot read the bid of Vast instance {instance_id}.') from e
+    # dph_total equals dph_base plus disk up to float rounding.
+    if (not all(math.isfinite(v) for v in (current, disk_hourly, limit)) or
+            current < 0 or disk_hourly < -1e-9 or limit <= 0):
+        raise RuntimeError(
+            f'Cannot verify the hourly price of Vast instance {instance_id} '
+            'against its limit; failing over.')
+    disk_hourly = max(disk_hourly, 0.0)
+    listing = machine_listing(instance.get('machine_id'), disk_size)
     if listing is None:
         raise RuntimeError(
             f'Vast instance {instance_id} cannot run again now: its machine '
             'is no longer listed for bids (rented on demand, offline or '
             'delisted).')
-    to_beat = float(listing['min_bid'])
+    try:
+        to_beat = float(listing['min_bid'])
+    except (TypeError, ValueError) as e:
+        raise RuntimeError(
+            f'Cannot read the listed bid for Vast instance {instance_id}.'
+        ) from e
+    if not math.isfinite(to_beat) or to_beat < 0:
+        raise RuntimeError(
+            f'Cannot verify the listed bid for Vast instance {instance_id}.')
     if current >= to_beat:
+        if current + disk_hourly > limit:
+            raise RuntimeError(
+                f'Vast instance {instance_id} costs '
+                f'${current + disk_hourly:.4f}/hour with disk, over the '
+                f'${limit:.4f}/hour limit.')
         return
     new_bid = _bid_over(to_beat)
     if new_bid + disk_hourly > limit:
