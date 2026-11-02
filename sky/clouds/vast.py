@@ -230,6 +230,9 @@ class Vast(clouds.Cloud):
             'custom_resources': custom_resources,
             'region': region.name,
             'image_id': image_id,
+            # The template's node Preemptible flag; without it every Vast
+            # launch, spot included, searched and rented on-demand offers.
+            'use_spot': resources.use_spot,
             'secure_only': secure_only,
             'max_price_multiplier': skypilot_config.get_effective_region_config(
                 cloud='vast',

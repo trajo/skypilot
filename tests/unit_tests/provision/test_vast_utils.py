@@ -581,3 +581,24 @@ def test_vast_remote_identity_config_schema():
         'remote_identity': 'NO_UPLOAD'
     }}, schemas.get_config_schema())
 
+
+@pytest.mark.parametrize('use_spot', [True, False])
+def test_spot_request_reaches_the_provisioner(monkeypatch, use_spot):
+    # Without use_spot in the deploy variables the template rendered
+    # `Preemptible: null`, so spot requests rented on-demand offers.
+    monkeypatch.setattr(clouds.Vast, 'get_accelerators_from_instance_type',
+                        classmethod(lambda cls, _: {'RTX3090': 1}))
+    resources = resources_lib.Resources(cloud=clouds.Vast(),
+                                        instance_type='1x-RTX_3090-32-65536',
+                                        region='RO',
+                                        use_spot=use_spot)
+    variables = clouds.Vast().make_deploy_resources_variables(
+        resources,
+        resources_utils.ClusterName('c',
+                                    'c-' + common_utils.get_user_hash()[:4]),
+        clouds.Region('RO'), None, 1)
+    assert variables['use_spot'] is use_spot
+    path = pathlib.Path(sky.__file__).parent / 'templates' / 'vast-ray.yml.j2'
+    rendered = jinja2.Template(path.read_text()).render(
+        num_nodes=1, credentials={}, initial_setup_commands=[], **variables)
+    assert f'Preemptible: {use_spot}' in rendered
