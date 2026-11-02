@@ -245,13 +245,19 @@ def test_rebid_clears_the_competing_bid(sdk, offer):
     sdk.change_bid.assert_called_once_with(id=789, price=pytest.approx(0.0525))
 
 
-@pytest.mark.parametrize('listing', [[{
-    'machine_id': 36512,
-    'min_bid': 0.048
-}], []])
-def test_no_rebid_when_already_highest_or_unlisted(sdk, listing):
-    sdk.search_offers.return_value = listing
+def test_no_rebid_when_already_highest(sdk):
+    sdk.search_offers.return_value = [{'machine_id': 36512, 'min_bid': 0.048}]
     utils.rebid_to_win(outbid(), limit=0.1)
+    sdk.change_bid.assert_not_called()
+
+
+@pytest.mark.parametrize('listing', [[], [{'machine_id': 1, 'min_bid': .01}]])
+def test_unlisted_machine_fails_over_at_once(sdk, listing):
+    # Observed 2026-11-02: with the machine no longer listed for bids (taken
+    # on demand or offline), three starts over 66 s were all stopped again.
+    sdk.search_offers.return_value = listing
+    with pytest.raises(RuntimeError, match='no longer listed for bids'):
+        utils.rebid_to_win(outbid(), limit=0.1)
     sdk.change_bid.assert_not_called()
 
 

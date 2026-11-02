@@ -644,8 +644,10 @@ def rebid_to_win(instance: Dict[str, Any], limit: float) -> None:
     run it again by itself; a bid over the listed price followed by a start
     does. Raises RuntimeError, so the provisioner tears down and fails over,
     when winning the machine back would exceed the hourly limit for rental
-    plus disk. Without a listing (machine rented on demand, offline or
-    delisted) the bid is left as is and only the start is attempted.
+    plus disk, or when the machine is no longer listed for bids at all
+    (rented on demand, offline or delisted): a start cannot succeed then
+    (observed 2026-11-02: three starts over 66 s, all stopped again). A
+    machine whose instance was only stopped stays listed as rented.
     """
     instance_id = str(instance['id'])
     try:
@@ -657,9 +659,10 @@ def rebid_to_win(instance: Dict[str, Any], limit: float) -> None:
         raise RuntimeError(
             f'Cannot read the bid of Vast instance {instance_id}.') from e
     if listing is None:
-        logger.info(f'Vast instance {instance_id}: its machine is not listed '
-                    'for bids; starting it without a rebid.')
-        return
+        raise RuntimeError(
+            f'Vast instance {instance_id} cannot run again now: its machine '
+            'is no longer listed for bids (rented on demand, offline or '
+            'delisted).')
     to_beat = float(listing['min_bid'])
     if current >= to_beat:
         return
