@@ -151,7 +151,8 @@ def launch(name: str,
            max_price_multiplier: float = 2.0,
            max_hourly_cost: Optional[float] = None,
            max_instance_creations: Optional[int] = None,
-           excluded_hosts: Optional[List[int]] = None) -> str:
+           excluded_hosts: Optional[List[int]] = None,
+           api_key_on_instance: bool = True) -> str:
     """Launches an instance with the given parameters.
 
     Converts the instance_type to the Vast GPU name, finds the specs for the
@@ -186,6 +187,10 @@ def launch(name: str,
 
     excluded_hosts lists Vast host IDs never to rent from. With a non-empty
     list, an offer without a host_id is skipped as well (fail closed).
+
+    api_key_on_instance writes the account's API key to ~/.vast_api_key on
+    the instance; the host operator can read it. False keeps it off the host
+    (on-instance Vast API calls, such as autostop, then cannot authenticate).
     """
     # Vast.ai SDK v6+ no longer accepts port mappings via the env field, so
     # `ports` is currently unused. Keep it in the signature for caller
@@ -414,10 +419,12 @@ def launch(name: str,
     sdk = vast.vast()
     # Legacy SDKs expose api_key directly; newer ones use a client object.
     api_client = getattr(sdk, 'client', sdk)
-    skypilot_onstart = [
-        'touch ~/.no_auto_tmux',
-        f'echo "{api_client.api_key}" > ~/.vast_api_key',
-    ]
+    skypilot_onstart = ['touch ~/.no_auto_tmux']
+    if api_key_on_instance:
+        # Lets on-instance tooling (e.g. autostop) call the Vast API. The host
+        # operator can read it, so `vast.remote_identity: NO_UPLOAD` omits it.
+        skypilot_onstart.append(
+            f'echo "{api_client.api_key}" > ~/.vast_api_key')
 
     # Inject SSH public key into authorized_keys if provided
     if ssh_public_key:

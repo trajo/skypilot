@@ -1,13 +1,21 @@
 """Vast selection must fail closed before any instance creation."""
 import copy
 import importlib
+import pathlib
 from unittest import mock
 
+import jinja2
 import jsonschema
 import pytest
 
+import sky
+from sky import clouds
+from sky import resources as resources_lib
+from sky import skypilot_config
 from sky.provision.vast import utils
 from sky.skylet import constants
+from sky.utils import common_utils
+from sky.utils import resources_utils
 from sky.utils import schemas
 
 
@@ -507,3 +515,69 @@ def test_journal_records_offer_host(sdk, offer, monkeypatch, tmp_path):
         'geolocation': 'Bucharest, RO',
         'hourly': 0.25
     }
+def test_api_key_on_instance_by_default(sdk):
+    launch()
+    onstart = sdk.create_instance.call_args.kwargs['onstart_cmd']
+    assert 'echo "test-key" > ~/.vast_api_key' in onstart
+
+
+def test_api_key_kept_off_instance(sdk):
+    launch(api_key_on_instance=False, ssh_public_key='ssh-ed25519 AAAA test')
+    onstart = sdk.create_instance.call_args.kwargs['onstart_cmd']
+    assert 'test-key' not in onstart
+    assert '.vast_api_key' not in onstart
+    assert onstart.startswith('touch ~/.no_auto_tmux')
+    assert 'ssh-ed25519 AAAA test' in onstart
+
+
+@pytest.mark.parametrize('config,expected', [
+    ({}, True),
+    ({
+        'vast': {
+            'remote_identity': 'LOCAL_CREDENTIALS'
+        }
+    }, True),
+    ({
+        'vast': {
+            'remote_identity': 'NO_UPLOAD'
+        }
+    }, False),
+])
+def test_remote_identity_controls_api_key_on_instance(monkeypatch, config,
+                                                      expected):
+    monkeypatch.setattr(clouds.Vast, 'get_accelerators_from_instance_type',
+                        classmethod(lambda cls, _: {'RTX3090': 1}))
+    resources = resources_lib.Resources(cloud=clouds.Vast(),
+                                        instance_type='1x-RTX_3090-32-65536',
+                                        region='RO')
+    with skypilot_config.override_skypilot_config(config):
+        variables = clouds.Vast().make_deploy_resources_variables(
+            resources,
+            resources_utils.ClusterName('c', 'c-' +
+                                        common_utils.get_user_hash()[:4]),
+            clouds.Region('RO'), None, 1)
+    assert variables['api_key_on_instance'] is expected
+
+
+@pytest.mark.parametrize('api_key_on_instance', [True, False])
+def test_template_carries_api_key_setting(api_key_on_instance):
+    path = pathlib.Path(sky.__file__).parent / 'templates' / 'vast-ray.yml.j2'
+    # Unset variables render empty; only these need concrete values.
+    rendered = jinja2.Template(path.read_text()).render(
+        num_nodes=1,
+        credentials={},
+        initial_setup_commands=[],
+        region='RO',
+        secure_only=False,
+        max_hourly_cost=None,
+        api_key_on_instance=api_key_on_instance)
+    provider_section = rendered.split('auth:')[0]
+    assert ('api_key_on_instance: false'
+            in provider_section) is (not api_key_on_instance)
+
+
+def test_vast_remote_identity_config_schema():
+    jsonschema.validate({'vast': {
+        'remote_identity': 'NO_UPLOAD'
+    }}, schemas.get_config_schema())
+

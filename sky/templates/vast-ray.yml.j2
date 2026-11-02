@@ -21,6 +21,9 @@ provider:
   {%- if excluded_hosts %}
   excluded_hosts: {{excluded_hosts | tojson}}
   {%- endif %}
+  {%- if api_key_on_instance is defined and not api_key_on_instance %}
+  api_key_on_instance: false
+  {%- endif %}
   {%- if create_instance_kwargs %}
   create_instance_kwargs: {{create_instance_kwargs | tojson}}
   {%- endif %}

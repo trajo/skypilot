@@ -3173,6 +3173,19 @@ This setting can be overridden per task via :ref:`config flag <config-client-cli
 Only raise it after reviewing the live price or refreshing a stale catalog.
 A dry run still shows catalog estimates; it does not reserve a live offer.
 
+.. _config-yaml-vast-remote-identity:
+
+``vast.remote_identity``
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+``NO_UPLOAD`` keeps local credential files off every cluster (as for other
+clouds) and also stops SkyPilot from writing the Vast account API key to
+``~/.vast_api_key`` on Vast instances, where the host operator can read it.
+On-instance Vast API calls, such as autostop, then cannot authenticate; managed
+jobs are torn down by their controller and are unaffected.
+
+Default: ``LOCAL_CREDENTIALS``
+
 .. _config-yaml-vast-create-instance-kwargs:
 
 ``vast.create_instance_kwargs``
@@ -3274,6 +3287,15 @@ Example using a Vast template:
     create_instance_kwargs:
       template_hash_id: "abc123def456"
       price: 0.50
+
+.. _config-yaml-runpod:
+
+``runpod``
+~~~~~~~~~~
+
+``runpod.remote_identity: NO_UPLOAD`` keeps ``~/.runpod/config.toml`` off every
+cluster. By default SkyPilot copies the credential files of every cloud that has
+them locally onto every cluster; set ``NO_UPLOAD`` per cloud to prevent that.
 
 .. _config-yaml-rbac:
 

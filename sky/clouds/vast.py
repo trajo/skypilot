@@ -10,6 +10,7 @@ from sky import skypilot_config
 from sky.adaptors import common
 from sky.utils import registry
 from sky.utils import resources_utils
+from sky.utils import schemas
 
 if typing.TYPE_CHECKING:
     from sky import resources as resources_lib
@@ -255,6 +256,15 @@ class Vast(clouds.Cloud):
                 keys=('excluded_hosts',),
                 default_value=None,
                 override_configs=resources.cluster_config_overrides),
+            # Same rule as the credential-file upload in backend_utils.
+            'api_key_on_instance':
+                (skypilot_config.get_effective_workspace_region_config(
+                    cloud='vast',
+                    region=region.name,
+                    keys=('remote_identity',),
+                    default_value=None,
+                    override_configs=resources.cluster_config_overrides) !=
+                 schemas.RemoteIdentityOptions.NO_UPLOAD.value),
             'create_instance_kwargs': create_instance_kwargs or {},
         }
 

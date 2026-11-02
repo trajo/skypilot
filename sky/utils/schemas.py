@@ -2428,6 +2428,14 @@ def get_config_schema():
                 },
             }
         },
+        'runpod': {
+            # Only remote_identity (added below), e.g. NO_UPLOAD to keep the
+            # local RunPod key off every cluster.
+            'type': 'object',
+            'required': [],
+            'additionalProperties': False,
+            'properties': {},
+        },
         'nebius': {
             'type': 'object',
             'required': [],
