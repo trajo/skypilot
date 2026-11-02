@@ -326,16 +326,20 @@ def test_loading_wait_is_bounded(monkeypatch, clock, provider):
                                 2 * instance.POLL_INTERVAL)
 
 
-@pytest.mark.parametrize('state,expected', [
-    (vm(status='CREATED',
-        intended_status='stopped'), status_lib.ClusterStatus.STOPPED),
-    (vm(status='LOADING',
-        intended_status='stopped'), status_lib.ClusterStatus.STOPPED),
-    (vm(status='LOADING'), status_lib.ClusterStatus.INIT),
-    (vm(status='EXITED'), status_lib.ClusterStatus.STOPPED),
-    (vm(), status_lib.ClusterStatus.UP),
-    (vm(intended_status='stopped'), status_lib.ClusterStatus.UP),
-])
+@pytest.mark.parametrize(
+    'state,expected',
+    [
+        (vm(status='CREATED',
+            intended_status='stopped'), status_lib.ClusterStatus.STOPPED),
+        (vm(status='LOADING',
+            intended_status='stopped'), status_lib.ClusterStatus.STOPPED),
+        (vm(status='LOADING'), status_lib.ClusterStatus.INIT),
+        (vm(status='EXITED'), status_lib.ClusterStatus.STOPPED),
+        (vm(), status_lib.ClusterStatus.UP),
+        # Outbid while running: SSH fails within seconds, but the instance is
+        # stopping, not broken; recovery can restart it in place.
+        (vm(intended_status='stopped'), status_lib.ClusterStatus.STOPPED),
+    ])
 def test_status_of_outbid_instances(monkeypatch, state, expected):
     monkeypatch.setattr(utils, 'list_instances', lambda: {'123': state})
     statuses = instance.query_instances('display', 'cloud', {})

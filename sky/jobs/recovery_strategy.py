@@ -1441,6 +1441,20 @@ class FailoverStrategyExecutor(StrategyExecutor):
             self._launched_resources = None
         return job_submitted_at
 
+    async def _cluster_is_stopped(self) -> bool:
+        """Whether the cloud reports every node of the cluster as stopped."""
+        if self.cluster_name is None or self.pool is not None:
+            return False
+        try:
+            cluster_status, _ = await asyncio.to_thread(
+                backend_utils.refresh_cluster_status_handle,
+                self.cluster_name,
+                force_refresh_statuses=set(status_lib.ClusterStatus))
+        except Exception as e:  # pylint: disable=broad-except
+            logger.debug(f'Failed to refresh the cluster status: {e}')
+            return False
+        return cluster_status == status_lib.ClusterStatus.STOPPED
+
     async def recover(self) -> float:
         # 1. Cancel the jobs and launch the cluster with the STOPPED status,
         #    so that it will try on the current region first until timeout.
@@ -1449,7 +1463,16 @@ class FailoverStrategyExecutor(StrategyExecutor):
         #    original user specification.
 
         # Step 1
-        await self._try_cancel_jobs()
+        # Stopped nodes run no job process, and the relaunch below restarts a
+        # stopped cluster in place with its disk (e.g. an outbid Vast
+        # interruptible instance, or a spot VM its cloud stops on
+        # preemption). Cancelling fails on a stopped cluster, and its
+        # fallback would terminate the cluster before that relaunch.
+        if await self._cluster_is_stopped():
+            logger.info('The cluster is stopped; keeping it to restart it in '
+                        'place.')
+        else:
+            await self._try_cancel_jobs()
 
         while True:
             # Add region constraint to the task, to retry on the same region

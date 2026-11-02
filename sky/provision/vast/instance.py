@@ -407,8 +407,9 @@ def query_instances(
                               Optional[str]]] = {}
     for inst_id, inst in instances.items():
         status = status_map.get(inst['status'], status_lib.ClusterStatus.INIT)
-        if inst['status'] != 'RUNNING' and _paused(inst):
-            # Outbid while loading: Vast will not run it until restarted.
+        if _paused(inst):
+            # Outbid or stopped, also while loading or still shutting down:
+            # Vast will not run it again until it is started.
             status = status_lib.ClusterStatus.STOPPED
         if non_terminated_only and status is None:
             continue

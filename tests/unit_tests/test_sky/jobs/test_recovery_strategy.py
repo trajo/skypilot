@@ -614,3 +614,84 @@ async def test_vast_absolute_price_failure_does_not_retry(
     patches.sdk_launch.assert_called_once()
     patches.set_backoff_pending.assert_not_awaited()
     executor._cleanup_cluster.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# FAILOVER restarts a stopped cluster in place instead of terminating it.
+# ---------------------------------------------------------------------------
+
+
+def _make_failover_executor(monkeypatch, refreshed):
+    executor = recovery_strategy.FailoverStrategyExecutor.__new__(
+        recovery_strategy.FailoverStrategyExecutor)
+    executor.cluster_name = 'test-cluster'
+    executor.pool = None
+    executor.dag = mock.MagicMock()
+    executor._launched_resources = mock.MagicMock()
+    executor._try_cancel_jobs = mock.AsyncMock()
+    executor._cleanup_cluster = mock.MagicMock()
+    executor._launch = mock.AsyncMock(return_value=123.45)
+    if isinstance(refreshed, Exception):
+        refresh = mock.MagicMock(side_effect=refreshed)
+    else:
+        refresh = mock.MagicMock(return_value=(refreshed, None))
+    monkeypatch.setattr(recovery_strategy.backend_utils,
+                        'refresh_cluster_status_handle', refresh)
+    return executor, refresh
+
+
+@pytest.mark.asyncio
+async def test_failover_keeps_a_stopped_cluster_to_restart_in_place(
+        monkeypatch):
+    # Cancelling fails on a stopped cluster, and its fallback terminates the
+    # cluster, so a paused Vast bid or a stopped spot VM lost its disk before
+    # the in-place relaunch could restart it.
+    executor, refresh = _make_failover_executor(
+        monkeypatch, recovery_strategy.status_lib.ClusterStatus.STOPPED)
+    assert await executor.recover() == 123.45
+    refresh.assert_called_once()
+    assert refresh.call_args.kwargs['force_refresh_statuses'] == set(
+        recovery_strategy.status_lib.ClusterStatus)
+    executor._try_cancel_jobs.assert_not_awaited()
+    executor._cleanup_cluster.assert_not_called()
+    executor._launch.assert_awaited_once_with(raise_on_failure=False,
+                                              recovery=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('refreshed', [
+    recovery_strategy.status_lib.ClusterStatus.INIT,
+    recovery_strategy.status_lib.ClusterStatus.UP,
+    None,
+    RuntimeError('refresh failed'),
+])
+async def test_failover_cancels_jobs_unless_the_cluster_is_stopped(
+        monkeypatch, refreshed):
+    executor, _ = _make_failover_executor(monkeypatch, refreshed)
+    assert await executor.recover() == 123.45
+    executor._try_cancel_jobs.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failover_with_pool_cancels_without_status_check(monkeypatch):
+    executor, refresh = _make_failover_executor(
+        monkeypatch, recovery_strategy.status_lib.ClusterStatus.STOPPED)
+    executor.pool = 'pool'
+    assert await executor.recover() == 123.45
+    refresh.assert_not_called()
+    executor._try_cancel_jobs.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failover_terminates_a_stopped_cluster_it_cannot_restart(
+        monkeypatch):
+    executor, _ = _make_failover_executor(
+        monkeypatch, recovery_strategy.status_lib.ClusterStatus.STOPPED)
+    executor._launch = mock.AsyncMock(side_effect=[None, 67.8])
+    assert await executor.recover() == 67.8
+    executor._cleanup_cluster.assert_called_once()
+    assert executor._launch.await_args_list[1].kwargs == {
+        'max_retry': executor._MAX_RETRY_CNT,
+        'raise_on_failure': False,
+        'recovery': True
+    }
