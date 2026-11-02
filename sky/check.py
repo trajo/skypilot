@@ -553,12 +553,17 @@ def get_cached_enabled_clouds_or_refresh(
 
 
 def get_cloud_credential_file_mounts(
-        excluded_clouds: Optional[Iterable[sky_clouds.Cloud]]
+    excluded_clouds: Optional[Iterable[sky_clouds.Cloud]],
+    storage_credentials: Optional[Iterable[str]] = None,
 ) -> Dict[str, str]:
     """Returns the files necessary to access all clouds.
 
     Returns a dictionary that will be added to a task's file mounts
     and a list of patterns that will be excluded (used as rsync_exclude).
+
+    storage_credentials names the storage-only clouds (see
+    constants.STORAGE_ONLY_CLOUDS) whose local credential files are included;
+    None includes all of them (`provision.storage_credentials`).
     """
     # Uploading credentials for all clouds instead of only sky check
     # enabled clouds because users may have partial credentials for some
@@ -579,25 +584,21 @@ def get_cloud_credential_file_mounts(
     # storage-only clouds as only clouds with computing instances are
     # marked as enabled by skypilot.
     # TODO (kyuds): recognize storage-only clouds as clouds.
-    r2_is_enabled, _ = cloudflare.check_storage_credentials()
-    if r2_is_enabled:
-        r2_credential_mounts = cloudflare.get_credential_file_mounts()
-        file_mounts.update(r2_credential_mounts)
-
-    coreweave_is_enabled, _ = coreweave.check_storage_credentials()
-    if coreweave_is_enabled:
-        coreweave_credential_mounts = coreweave.get_credential_file_mounts()
-        file_mounts.update(coreweave_credential_mounts)
-
-    vastdata_is_enabled, _ = vastdata.check_storage_credentials()
-    if vastdata_is_enabled:
-        vastdata_credential_mounts = vastdata.get_credential_file_mounts()
-        file_mounts.update(vastdata_credential_mounts)
-
-    hf_is_enabled, _ = huggingface.check_storage_credentials()
-    if hf_is_enabled:
-        hf_credential_mounts = huggingface.get_credential_file_mounts()
-        file_mounts.update(hf_credential_mounts)
+    # remote_identity does not cover these; provision.storage_credentials does.
+    allowed = (None if storage_credentials is None else
+               {name.lower() for name in storage_credentials})
+    storage_adaptors: Dict[str, Any] = {
+        'cloudflare': cloudflare,
+        'coreweave': coreweave,
+        'vastdata': vastdata,
+        'huggingface': huggingface,
+    }
+    for name, adaptor in storage_adaptors.items():
+        if allowed is not None and name not in allowed:
+            continue
+        is_enabled, _ = adaptor.check_storage_credentials()
+        if is_enabled:
+            file_mounts.update(adaptor.get_credential_file_mounts())
     return file_mounts
 
 

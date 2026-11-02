@@ -908,7 +908,10 @@ def write_cluster_config(
                     schemas.RemoteIdentityOptions.NO_UPLOAD.value):
                 excluded_clouds.add(cloud_obj)
 
-    credentials = sky_check.get_cloud_credential_file_mounts(excluded_clouds)
+    credentials = sky_check.get_cloud_credential_file_mounts(
+        excluded_clouds,
+        storage_credentials=skypilot_config.get_nested(
+            ('provision', 'storage_credentials'), None))
 
     logging_agent = logs.get_logging_agent()
     if logging_agent:

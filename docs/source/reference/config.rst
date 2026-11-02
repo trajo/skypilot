@@ -762,6 +762,34 @@ determines how long to wait for the connection to be established.
 
 Default: ``10``.
 
+.. _config-yaml-provision-storage-credentials:
+
+``provision.storage_credentials``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Storage-only credential files to upload to every cluster (optional). By
+default, SkyPilot uploads each of these that exists locally, regardless of any
+cloud's ``remote_identity``:
+
+- ``cloudflare`` (R2): ``~/.cloudflare/r2.credentials``, ``~/.cloudflare/accountid``
+- ``coreweave``: ``~/.coreweave/cw.credentials``, ``~/.coreweave/cw.config``
+- ``vastdata``: ``~/.vastdata/vastdata.credentials``, ``~/.vastdata/vastdata.config``
+- ``huggingface``: ``~/.cache/huggingface/token`` (or the legacy ``~/.huggingface/token``)
+
+List only the ones clusters need; ``[]`` uploads none. Tasks that mount or read
+a store whose credentials are left out then cannot access it. On marketplace
+clouds (Vast, RunPod community hosts) anyone operating the host can read the
+uploaded files.
+
+Default: all of the above that exist locally.
+
+Example:
+
+.. code-block:: yaml
+
+  provision:
+    storage_credentials: [huggingface]
+
 .. _config-yaml-provision-install-conda:
 
 ``provision.install_conda``

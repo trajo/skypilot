@@ -2950,6 +2950,16 @@ def get_config_schema():
             'install_conda': {
                 'type': 'boolean',
             },
+            # Storage-only credential files uploaded to clusters; default all
+            # that exist locally. [] uploads none.
+            'storage_credentials': {
+                'type': 'array',
+                'items': {
+                    'type': 'string',
+                    'case_insensitive_enum': constants.STORAGE_ONLY_CLOUDS,
+                },
+                'uniqueItems': True,
+            },
         }
     }
 
