@@ -216,13 +216,30 @@ def test_offers_over_the_limit_are_never_tried(sdk, offer):
     sdk.create_instance.assert_called_once()
 
 
-def test_other_errors_do_not_fall_through(sdk, offer):
+def http_error(status):
+    response = requests.Response()
+    response.status_code = status
+    return requests.HTTPError(str(status), response=response)
+
+
+def test_bad_request_falls_through_without_a_bid_retry(sdk, offer):
+    # Observed 2026-11-02: a listed, rentable offer answered 400 Bad Request.
     other = dict(offer, id=124, machine_id=36513, min_bid=0.16)
     sdk.search_offers.return_value = [offer, other]
-    response = requests.Response()
-    response.status_code = 400
-    sdk.create_instance.side_effect = requests.HTTPError('400',
-                                                         response=response)
+    sdk.create_instance.side_effect = [http_error(400), {'new_contract': 789}]
+    assert launch() == '789'
+    assert [c.kwargs['id'] for c in sdk.create_instance.call_args_list
+           ] == [123, 124]
+    # Only the offer search ran: a 400 is not retried with a higher bid.
+    sdk.search_offers.assert_called_once()
+    assert set(journal.read('cloud')['refused_offers']) == {'123'}
+
+
+@pytest.mark.parametrize('status', [401, 402, 403, 429])
+def test_account_errors_do_not_fall_through(sdk, offer, status):
+    other = dict(offer, id=124, machine_id=36513, min_bid=0.16)
+    sdk.search_offers.return_value = [offer, other]
+    sdk.create_instance.side_effect = http_error(status)
     with pytest.raises(requests.HTTPError):
         launch()
     sdk.create_instance.assert_called_once()

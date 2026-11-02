@@ -29,6 +29,11 @@ _MIN_BID_STEP = 0.002
 # up to this many offers within the price limit, cheapest first.
 _REFUSED_OFFER_SECONDS = 30 * 60
 _MAX_OFFERS_PER_LAUNCH = 3
+# Create errors that concern the offer, not the account or request rate:
+# 410 no_such_ask (gone, or a bid that does not clear the price), 400 (seen
+# for listed offers, and for 'GPU conflict' on a machine the account holds),
+# 404 and 409.
+_OFFER_REFUSAL_STATUSES = (400, 404, 409, 410)
 
 # Country groups used by Vast's georegion directive (vastai/utils.py).
 _GEOREGIONS = {
@@ -542,13 +547,15 @@ def launch(name: str,
             new_instance_contract = create_on(instance_touse, offer_identity)
             break
         except Exception as e:  # pylint: disable=broad-except
-            if not single_attempt or _http_status(e) != 410:
+            if (not single_attempt or
+                    _http_status(e) not in _OFFER_REFUSAL_STATUSES):
                 raise
             journal.refused(name, instance_touse['id'])
             if index == len(offers) - 1:
                 raise
-            logger.info(f'Vast refused offer {instance_touse["id"]}; trying '
-                        'the next-cheapest offer within the limit.')
+            logger.info(f'Vast refused offer {instance_touse["id"]} '
+                        f'(HTTP {_http_status(e)}); trying the next-cheapest '
+                        'offer within the limit.')
     if (not isinstance(new_instance_contract, dict) or
             isinstance(new_instance_contract.get('new_contract'), bool) or
             not str(new_instance_contract.get('new_contract', '')).isdigit()):
@@ -576,6 +583,10 @@ def _create(creator: Any, launch_params: Dict[str, Any], name: str,
             # The provider refused this single request (e.g. 410 Gone when
             # another renter took the offer): no instance exists.
             journal.rejected(name, status)
+            reason = str(getattr(getattr(e, 'response', None), 'text', ''))
+            logger.info(f'Vast refused the create on offer '
+                        f'{launch_params.get("id")} (HTTP {status}): '
+                        f'{reason[:300]}')
         raise
 
 
