@@ -88,6 +88,15 @@ def created(label, instance_id, offer=None):
         write(value)
 
 
+def rejected(label, status):
+    """The provider refused a single-attempt create: nothing was created."""
+    value = read(label.rsplit('-', 1)[0])
+    if value is not None and value['pending'] == label:
+        value.setdefault('rejections', []).append(int(status))
+        value['pending'] = None
+        write(value)
+
+
 def for_cluster(cluster):
     if not ROOT.exists():
         return []

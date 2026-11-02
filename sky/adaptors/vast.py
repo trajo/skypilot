@@ -3,6 +3,7 @@
 import functools
 
 _vast_sdk = None
+_vast_create_sdk = None
 
 
 class _VastClient:
@@ -55,3 +56,19 @@ def import_package(func):
 def vast():
     """Return the vast package."""
     return _vast_sdk
+
+
+@import_package
+def create_sdk():
+    """An SDK whose requests are sent exactly once, for instance creation.
+
+    The default client retries timeouts and 429/5xx answers. A retried create
+    can meet an offer that its own lost first attempt already rented, so a
+    refusal would not prove that nothing was created. Sent once, a 4xx answer
+    is the provider's verdict on this very request.
+    """
+    global _vast_create_sdk
+    if _vast_create_sdk is None:
+        import vastai as _vast  # pylint: disable=import-outside-toplevel
+        _vast_create_sdk = _vast.VastAI(retry=1)
+    return _vast_create_sdk

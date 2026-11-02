@@ -7,11 +7,14 @@ from unittest import mock
 import jinja2
 import jsonschema
 import pytest
+import requests
 
 import sky
 from sky import clouds
 from sky import resources as resources_lib
 from sky import skypilot_config
+from sky.adaptors import vast as vast_adaptor
+from sky.provision.vast import journal
 from sky.provision.vast import utils
 from sky.skylet import constants
 from sky.utils import common_utils
@@ -47,6 +50,7 @@ def mock_sdk(monkeypatch, offer):
     client.show_instance.return_value = {'id': '456'}
     client.client.api_key = 'test-key'
     monkeypatch.setattr(utils.vast, 'vast', lambda: client)
+    monkeypatch.setattr(utils.vast, 'create_sdk', lambda: client)
     monkeypatch.setattr(utils.catalog, 'get_hourly_cost', lambda *a, **kw: 0.25)
     return client
 
@@ -602,3 +606,72 @@ def test_spot_request_reaches_the_provisioner(monkeypatch, use_spot):
     rendered = jinja2.Template(path.read_text()).render(
         num_nodes=1, credentials={}, initial_setup_commands=[], **variables)
     assert f'Preemptible: {use_spot}' in rendered
+
+
+def _http_error(status):
+    response = requests.Response()
+    response.status_code = status
+    return requests.HTTPError(f'{status} error', response=response)
+
+
+@pytest.mark.parametrize('status', [400, 404, 410, 429])
+def test_refused_create_is_resolved(sdk, monkeypatch, tmp_path, status):
+    # A single-attempt create that the provider refuses created nothing, so
+    # recovery can clean up and fail over instead of stalling.
+    monkeypatch.setattr(journal, 'ROOT', tmp_path)
+    journal.register('display', 'cloud')
+    sdk.create_instance.side_effect = _http_error(status)
+    with pytest.raises(requests.HTTPError):
+        launch(name='cloud-head')
+    record = journal.read('cloud')
+    assert record['pending'] is None
+    assert record['rejections'] == [status]
+    monkeypatch.setattr(utils, 'list_instances', lambda: {})
+    journal.cleanup_cluster('display')
+    assert journal.read('cloud')['cleaned']
+
+
+@pytest.mark.parametrize('error', [
+    _http_error(502),
+    requests.ConnectionError('reset'),
+    TimeoutError('response lost'),
+])
+def test_ambiguous_create_failure_stays_unresolved(sdk, monkeypatch, tmp_path,
+                                                   error):
+    monkeypatch.setattr(journal, 'ROOT', tmp_path)
+    journal.register('display', 'cloud')
+    sdk.create_instance.side_effect = error
+    with pytest.raises(type(error)):
+        launch(name='cloud-head')
+    assert journal.read('cloud')['pending'] == 'cloud-head'
+
+
+def test_legacy_sdk_refusal_stays_unresolved(sdk, monkeypatch, tmp_path):
+    # Legacy SDKs may retry internally, so even a 4xx cannot prove absence.
+    del sdk.client
+    sdk.api_key = 'legacy-test-key'
+    monkeypatch.setattr(journal, 'ROOT', tmp_path)
+    journal.register('display', 'cloud')
+    sdk.create_instance.side_effect = _http_error(410)
+    with pytest.raises(requests.HTTPError):
+        launch(name='cloud-head')
+    assert journal.read('cloud')['pending'] == 'cloud-head'
+
+
+def test_create_client_sends_each_request_once(monkeypatch):
+    built = []
+
+    class FakeVastAI:
+
+        def __init__(self, retry=3):
+            built.append(retry)
+
+    monkeypatch.setattr(vast_adaptor, '_vast_sdk', object())
+    monkeypatch.setattr(vast_adaptor, '_vast_create_sdk', None)
+    monkeypatch.setitem(
+        importlib.import_module('sys').modules, 'vastai',
+        mock.Mock(VastAI=FakeVastAI))
+    client = vast_adaptor.create_sdk()
+    assert isinstance(client, FakeVastAI)
+    assert built == [1]
+    assert vast_adaptor.create_sdk() is client

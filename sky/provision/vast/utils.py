@@ -466,7 +466,19 @@ def launch(name: str,
     launch_params.setdefault('direct', True)
     launch_params.setdefault('cancel_unavail', True)
     journal.creating(name, max_instance_creations)
-    new_instance_contract = vast.vast().create_instance(**launch_params)
+    # Legacy SDKs keep their own retry behaviour, so their errors stay
+    # unresolved; current SDKs create through a single-attempt client.
+    single_attempt = api_client is not sdk
+    creator = vast.create_sdk() if single_attempt else sdk
+    try:
+        new_instance_contract = creator.create_instance(**launch_params)
+    except Exception as e:  # pylint: disable=broad-except
+        status = getattr(getattr(e, 'response', None), 'status_code', None)
+        if single_attempt and isinstance(status, int) and 400 <= status < 500:
+            # The provider refused this single request (e.g. 410 Gone when
+            # another renter took the offer): no instance exists.
+            journal.rejected(name, status)
+        raise
     if (not isinstance(new_instance_contract, dict) or
             isinstance(new_instance_contract.get('new_contract'), bool) or
             not str(new_instance_contract.get('new_contract', '')).isdigit()):
