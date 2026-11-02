@@ -160,6 +160,75 @@ def test_only_listed_minimum_bids_are_retried(sdk, offer, kwargs):
     sdk.create_instance.assert_called_once()
 
 
+def test_refused_offer_falls_through_to_the_next_cheapest(sdk, offer):
+    # Observed 2026-11-02: an offer stayed listed as rentable while Vast
+    # refused every bid on it, so retrying only the cheapest offer stalled.
+    other = dict(offer, id=124, machine_id=36513, min_bid=0.16, dph_total=0.26)
+    sdk.search_offers.side_effect = [[other, offer], [offer]]
+    sdk.create_instance.side_effect = [gone(), gone(), {'new_contract': 789}]
+    assert launch() == '789'
+    calls = [(c.kwargs['id'], c.kwargs['price'])
+             for c in sdk.create_instance.call_args_list]
+    assert calls == [(123, 0.15), (123, pytest.approx(0.1575)), (124, 0.16)]
+    record = journal.read('cloud')
+    assert set(record['refused_offers']) == {'123'}
+    assert record['rejections'] == [410, 410]
+    assert record['ids'] == ['789']
+    assert record['offers']['789']['offer'] == '124'
+    assert record['pending'] is None
+
+
+def test_recently_refused_offer_is_skipped_in_later_launches(sdk, offer):
+    other = dict(offer, id=124, machine_id=36513, min_bid=0.16, dph_total=0.26)
+    sdk.search_offers.return_value = [offer, other]
+    journal.refused('cloud-head', 123)
+    assert launch() == '456'
+    assert sdk.create_instance.call_args.kwargs['id'] == 124
+    # Once the refusal is older than the cool-down, the offer is tried again.
+    record = journal.read('cloud')
+    record['refused_offers']['123'] -= 31 * 60
+    journal.write(record)
+    assert launch() == '456'
+    assert sdk.create_instance.call_args.kwargs['id'] == 123
+
+
+def test_offers_tried_per_launch_are_bounded(sdk, offer):
+    offers = [
+        dict(offer, id=200 + i, machine_id=1000 + i, min_bid=0.15 + i / 1000)
+        for i in range(4)
+    ]
+    # No machine listing: refused bids are not retried, only other offers.
+    sdk.search_offers.side_effect = [offers] + [[]] * 3
+    sdk.create_instance.side_effect = gone()
+    with pytest.raises(requests.HTTPError):
+        launch()
+    assert [c.kwargs['id'] for c in sdk.create_instance.call_args_list
+           ] == [200, 201, 202]
+    assert set(journal.read('cloud')['refused_offers']) == {'200', '201', '202'}
+
+
+def test_offers_over_the_limit_are_never_tried(sdk, offer):
+    expensive = dict(offer, id=124, machine_id=36513, min_bid=0.30)
+    sdk.search_offers.side_effect = [[offer, expensive], []]
+    sdk.create_instance.side_effect = gone()
+    with pytest.raises(requests.HTTPError):
+        launch(max_hourly_cost=0.2)
+    sdk.create_instance.assert_called_once()
+
+
+def test_other_errors_do_not_fall_through(sdk, offer):
+    other = dict(offer, id=124, machine_id=36513, min_bid=0.16)
+    sdk.search_offers.return_value = [offer, other]
+    response = requests.Response()
+    response.status_code = 400
+    sdk.create_instance.side_effect = requests.HTTPError('400',
+                                                         response=response)
+    with pytest.raises(requests.HTTPError):
+        launch()
+    sdk.create_instance.assert_called_once()
+    assert 'refused_offers' not in journal.read('cloud')
+
+
 def outbid(**changes):
     return dict(
         dict(id='789',

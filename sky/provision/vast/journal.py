@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 
 from sky import exceptions
 from sky.utils import common_utils
@@ -95,6 +96,24 @@ def rejected(label, status):
         value.setdefault('rejections', []).append(int(status))
         value['pending'] = None
         write(value)
+
+
+def refused(label, offer):
+    """Remember an offer the provider would not rent to this cluster."""
+    value = read(label.rsplit('-', 1)[0])
+    if value is not None:
+        value.setdefault('refused_offers', {})[str(offer)] = time.time()
+        write(value)
+
+
+def recently_refused(label, seconds):
+    """Offers refused to this cluster within the last `seconds`."""
+    value = read(label.rsplit('-', 1)[0]) or {}
+    cutoff = time.time() - seconds
+    return {
+        offer for offer, at in value.get('refused_offers', {}).items()
+        if at >= cutoff
+    }
 
 
 def for_cluster(cluster):

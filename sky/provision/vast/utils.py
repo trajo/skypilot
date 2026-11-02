@@ -24,6 +24,11 @@ logger = sky_logging.init_logger(__name__)
 # step in dollars per hour.
 _BID_STEP_FRACTION = 0.05
 _MIN_BID_STEP = 0.002
+# Vast keeps listing some offers it refuses to rent (observed for minutes), so
+# a cluster skips an offer refused to it for this long, and one launch tries
+# up to this many offers within the price limit, cheapest first.
+_REFUSED_OFFER_SECONDS = 30 * 60
+_MAX_OFFERS_PER_LAUNCH = 3
 
 # Country groups used by Vast's georegion directive (vastai/utils.py).
 _GEOREGIONS = {
@@ -310,6 +315,8 @@ def launch(name: str,
         order='dph_total')
     candidates = []
     skipped_hosts: set = set()
+    refused = journal.recently_refused(name, _REFUSED_OFFER_SECONDS)
+    skipped_refused: set = set()
     bid = (create_instance_kwargs or {}).get('bid_price')
     if bid is None:
         bid = (create_instance_kwargs or {}).get('price')
@@ -319,6 +326,9 @@ def launch(name: str,
         host = _host_id(offer)
         if excluded and (host is None or host in excluded):
             skipped_hosts.add(host)
+            continue
+        if str(offer.get('id')) in refused:
+            skipped_refused.add(offer['id'])
             continue
         try:
             price = _offer_price(offer, preemptible, required_disk, bid)
@@ -330,28 +340,36 @@ def launch(name: str,
     if skipped_hosts:
         logger.info('Vast offers skipped from excluded hosts: '
                     f'{sorted(skipped_hosts, key=str)}')
+    if skipped_refused:
+        logger.info('Vast offers skipped after refusing this cluster: '
+                    f'{sorted(skipped_refused, key=str)}')
     if not candidates:
         raise RuntimeError('No matching Vast offer with a verifiable price '
                            f'satisfies the requirements: {query}'
                            + (f', excluding hosts {sorted(excluded)}'
                               if excluded else '') +
                            '. No instance was created.')
-    actual_price, instance_touse = min(candidates, key=lambda item: item[0])
-    offer_identity = {
-        'offer': str(instance_touse['id']),
-        'host_id': _host_id(instance_touse),
-        'machine_id': instance_touse.get('machine_id'),
-        'geolocation': instance_touse.get('geolocation'),
-        'hourly': round(actual_price, 6),
-    }
-    logger.info(f'Vast offer {instance_touse["id"]}: {gpu_name} x{count}, '
-                f'host {offer_identity["host_id"]}, '
-                f'machine {offer_identity["machine_id"]}, '
-                f'{instance_touse["geolocation"]}, '
-                f'${actual_price:.4f}/hour including allocated disk '
-                f'(catalog estimate ${estimated_price:.4f}/hour; '
-                f'limit ${price_limit:.4f}/hour). '
-                'Metered network charges are additional.')
+    candidates.sort(key=lambda item: item[0])
+
+    def describe(price: float, offer: Dict[str, Any]) -> Dict[str, Any]:
+        logger.info(f'Vast offer {offer["id"]}: {gpu_name} x{count}, '
+                    f'host {_host_id(offer)}, '
+                    f'machine {offer.get("machine_id")}, '
+                    f'{offer["geolocation"]}, '
+                    f'${price:.4f}/hour including allocated disk '
+                    f'(catalog estimate ${estimated_price:.4f}/hour; '
+                    f'limit ${price_limit:.4f}/hour). '
+                    'Metered network charges are additional.')
+        return {
+            'offer': str(offer['id']),
+            'host_id': _host_id(offer),
+            'machine_id': offer.get('machine_id'),
+            'geolocation': offer.get('geolocation'),
+            'hourly': round(price, 6),
+        }
+
+    actual_price, instance_touse = candidates[0]
+    offer_identity = describe(actual_price, instance_touse)
     if actual_price > price_limit:
         if max_hourly_cost is not None:
             # Use the existing non-capacity failover path: the managed job
@@ -485,25 +503,52 @@ def launch(name: str,
     # unresolved; current SDKs create through a single-attempt client.
     single_attempt = api_client is not sdk
     creator = vast.create_sdk() if single_attempt else sdk
-    try:
-        new_instance_contract = _create(creator, launch_params, name,
-                                        max_instance_creations, single_attempt)
-    except Exception as e:  # pylint: disable=broad-except
-        status = getattr(getattr(e, 'response', None), 'status_code', None)
-        retry_bid = None
-        if single_attempt and preemptible and bid is None and status == 410:
-            retry_bid = _bid_after_refusal(instance_touse, required_disk,
-                                           price_limit)
-        if retry_bid is None:
-            raise
-        logger.info(f'Vast refused bid ${launch_params["price"]:.4f}/hour '
-                    f'for offer {instance_touse["id"]}; retrying once at '
-                    f'${retry_bid:.4f}/hour.')
-        launch_params['price'] = retry_bid
-        offer_identity['hourly'] = round(
-            _offer_price(instance_touse, True, required_disk, retry_bid), 6)
-        new_instance_contract = _create(creator, launch_params, name,
-                                        max_instance_creations, single_attempt)
+
+    def create_on(offer: Dict[str, Any], identity: Dict[str, Any]) -> Any:
+        """Create on one offer, retrying a refused listed bid once over the
+        machine's current listing."""
+        try:
+            return _create(creator, launch_params, name, max_instance_creations,
+                           single_attempt)
+        except Exception as e:  # pylint: disable=broad-except
+            retry_bid = None
+            if (single_attempt and preemptible and bid is None and
+                    _http_status(e) == 410):
+                retry_bid = _bid_after_refusal(offer, required_disk,
+                                               price_limit)
+            if retry_bid is None:
+                raise
+            logger.info(f'Vast refused bid ${launch_params["price"]:.4f}/hour '
+                        f'for offer {offer["id"]}; retrying once at '
+                        f'${retry_bid:.4f}/hour.')
+            launch_params['price'] = retry_bid
+            identity['hourly'] = round(
+                _offer_price(offer, True, required_disk, retry_bid), 6)
+            return _create(creator, launch_params, name, max_instance_creations,
+                           single_attempt)
+
+    # A refused offer may stay listed: move on to the next-cheapest offer
+    # within the limit, and skip the refused one in later launches.
+    offers = [item for item in candidates if item[0] <= price_limit]
+    offers = offers[:_MAX_OFFERS_PER_LAUNCH if single_attempt else 1]
+    new_instance_contract: Any = None
+    for index, (actual_price, instance_touse) in enumerate(offers):
+        if index:
+            offer_identity = describe(actual_price, instance_touse)
+            launch_params['id'] = instance_touse['id']
+            if preemptible and bid is None:
+                launch_params['price'] = instance_touse.get('min_bid')
+        try:
+            new_instance_contract = create_on(instance_touse, offer_identity)
+            break
+        except Exception as e:  # pylint: disable=broad-except
+            if not single_attempt or _http_status(e) != 410:
+                raise
+            journal.refused(name, instance_touse['id'])
+            if index == len(offers) - 1:
+                raise
+            logger.info(f'Vast refused offer {instance_touse["id"]}; trying '
+                        'the next-cheapest offer within the limit.')
     if (not isinstance(new_instance_contract, dict) or
             isinstance(new_instance_contract.get('new_contract'), bool) or
             not str(new_instance_contract.get('new_contract', '')).isdigit()):
@@ -514,6 +559,10 @@ def launch(name: str,
     instance_id = str(new_instance_contract['new_contract'])
     journal.created(name, instance_id, offer_identity)
     return instance_id
+
+
+def _http_status(error: Exception) -> Optional[int]:
+    return getattr(getattr(error, 'response', None), 'status_code', None)
 
 
 def _create(creator: Any, launch_params: Dict[str, Any], name: str,
