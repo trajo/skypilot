@@ -249,6 +249,10 @@ def launch(name: str,
     # `ports` is currently unused. Keep it in the signature for caller
     # compatibility and future use (port-forwarding is handled separately).
     del ports
+    # The limit holds for the cluster in every region: check it before the
+    # offer search, so a region without offers reports the limit too rather
+    # than a capacity failure that recovery would keep retrying.
+    journal.check_limit(name, max_instance_creations)
     # Split from the right: GPU model names themselves can contain hyphens.
     gpu_spec, cpu_cores, cpu_ram = instance_type.rsplit('-', 2)
     count, gpu_name = gpu_spec.split('x-', 1)

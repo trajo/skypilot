@@ -9,6 +9,8 @@ import pytest
 from sky import exceptions
 from sky.jobs import recovery_strategy
 from sky.jobs import scheduler as scheduler_module
+from sky.provision.vast import journal as vast_journal
+from sky.provision.vast import utils as vast_utils
 
 
 def test_is_oom_failure_detects_oomkilled():
@@ -790,3 +792,89 @@ async def test_creation_limit_with_capacity_failure_returns_none(monkeypatch):
                                                    raise_on_failure=False),
                                   timeout=5) is None
     patches.sdk_launch.assert_called_once()
+
+
+def _backend_history_entry(error):
+    """What the backend's failover history records for a candidate's error.
+
+    cloud_vm_ray_backend.py: _retry_zones re-raises a
+    ProvisionUnsupportedError unchanged and provision_with_retries records
+    it; any other provisioning error is retried over the candidate's zones
+    and the candidate then ends as a ResourcesUnavailableError.
+    """
+    if isinstance(error, exceptions.ProvisionUnsupportedError):
+        return error
+    return exceptions.ResourcesUnavailableError(str(error))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('strategy_cls', [
+    recovery_strategy.FailoverStrategyExecutor,
+    recovery_strategy.EagerFailoverStrategyExecutor,
+])
+async def test_creation_limit_in_every_vast_region_fails_recovery(
+        monkeypatch, tmp_path, strategy_cls):
+    # The cluster has used up its creations. One region has an offer, the
+    # other has none; both must report the limit, so recovery fails instead
+    # of reading the empty region as a capacity failure and retrying.
+    monkeypatch.setattr(vast_journal, 'ROOT', tmp_path)
+    vast_journal.register('display', 'cloud')
+    vast_journal.creating('cloud-head', max_instance_creations=1)
+    vast_journal.created('cloud-head', 456)
+    offer = dict(id=123,
+                 gpu_name='RTX 3090',
+                 num_gpus=1,
+                 cpu_ram=65536,
+                 cpu_cores=32,
+                 cpu_cores_effective=32,
+                 disk_space=200,
+                 geolocation='Bucharest, RO',
+                 verified=True,
+                 rentable=True,
+                 rented=False,
+                 external=False,
+                 dph_total=0.25,
+                 storage_cost=0.10)
+    client = mock.Mock()
+    client.search_offers.side_effect = [[offer], []]
+    monkeypatch.setattr(vast_utils.vast, 'vast', lambda: client)
+    monkeypatch.setattr(vast_utils.vast, 'create_sdk', lambda: client)
+    monkeypatch.setattr(vast_utils.catalog, 'get_hourly_cost',
+                        lambda *a, **kw: 0.25)
+    history = []
+    for region in ('RO', 'DE'):
+        with pytest.raises(Exception) as error:
+            vast_utils.launch(name='cloud-head',
+                              instance_type='1x-RTX_3090-32-65536',
+                              region=region,
+                              disk_size=100,
+                              image_name='test-image',
+                              ports=None,
+                              preemptible=False,
+                              secure_only=False,
+                              max_instance_creations=1)
+        # Either the limit, or the region's own "no offer" failure.
+        assert isinstance(
+            error.value,
+            (exceptions.InstanceCreationLimitError, RuntimeError)), error.value
+        history.append(_backend_history_entry(error.value))
+    client.create_instance.assert_not_called()
+
+    launch_error = exceptions.deserialize_exception(
+        pickle.loads(
+            pickle.dumps(
+                exceptions.serialize_exception(
+                    exceptions.ResourcesUnavailableError(
+                        'Failed to provision all possible launchable '
+                        'resources.',
+                        failover_history=history)))))
+    executor, patches = _make_recovering_executor(monkeypatch, strategy_cls,
+                                                  launch_error)
+    with pytest.raises(exceptions.ManagedJobReachedMaxRetriesError,
+                       match='Instance creation limit reached'):
+        await asyncio.wait_for(executor.recover(), timeout=5)
+    patches.sdk_launch.assert_called_once()
+    assert all(
+        isinstance(err, exceptions.InstanceCreationLimitError)
+        for err in history)
+    client.search_offers.assert_not_called()

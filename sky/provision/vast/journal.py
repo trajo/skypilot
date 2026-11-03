@@ -55,9 +55,12 @@ def register(cluster, name):
         raise RuntimeError('Vast provisioning identity mismatch')
 
 
-def creating(label, max_instance_creations=None):
-    name = label.rsplit('-', 1)[0]
-    value = read(name)
+def check_limit(label, max_instance_creations=None):
+    """Raise if the cluster may not create another instance. Writes nothing.
+
+    Returns the journal record, or None if there is none.
+    """
+    value = read(label.rsplit('-', 1)[0])
     if max_instance_creations is not None:
         if (isinstance(max_instance_creations, bool) or
                 not isinstance(max_instance_creations, int) or
@@ -71,6 +74,11 @@ def creating(label, max_instance_creations=None):
             raise exceptions.InstanceCreationLimitError(
                 'Vast instance creation limit reached; '
                 'submit a new authorized request')
+    return value
+
+
+def creating(label, max_instance_creations=None):
+    value = check_limit(label, max_instance_creations)
     if value is not None:
         if value['pending']:
             raise RuntimeError('Unresolved Vast create; reconcile before retry')

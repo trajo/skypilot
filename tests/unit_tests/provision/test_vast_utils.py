@@ -475,6 +475,25 @@ def test_creation_limit_raises_dedicated_error(monkeypatch, tmp_path):
     assert journal.read('cloud')['pending'] is None
 
 
+def test_creation_limit_checked_before_offer_search(sdk, monkeypatch, tmp_path):
+    # The limit holds for the cluster in every region. Checked only after an
+    # offer was found, a region without offers reported a capacity failure
+    # instead, and managed-job recovery kept retrying on that.
+    from sky import exceptions
+    from sky.provision.vast import journal
+    monkeypatch.setattr(journal, 'ROOT', tmp_path)
+    journal.register('display', 'cloud')
+    launch(name='cloud-head', max_instance_creations=1)
+    record = journal.read('cloud')
+    sdk.search_offers.reset_mock()
+    sdk.search_offers.return_value = []
+    with pytest.raises(exceptions.InstanceCreationLimitError):
+        launch(name='cloud-head', max_instance_creations=1)
+    sdk.search_offers.assert_not_called()
+    sdk.create_instance.assert_called_once()
+    assert journal.read('cloud') == record
+
+
 def test_excluded_hosts_skip_to_next_cheapest(sdk, offer):
     bad = dict(offer, id=1, host_id=213498, dph_total=0.20)
     good = dict(offer, id=2, host_id=7, machine_id=70, dph_total=0.30)
