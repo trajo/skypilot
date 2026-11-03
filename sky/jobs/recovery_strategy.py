@@ -837,6 +837,9 @@ class StrategyExecutor:
                 unavailability.
                 2. The cluster is preempted before the job is submitted.
                 3. Any unexpected error happens during the `sky.launch`.
+                It is also raised when raise_on_failure is False and the
+                launch failed only on non-capacity reasons including
+                InstanceCreationLimitError, since no relaunch can pass it.
             exceptions.PoolDoesNotExistError: This will be raised when the
                 pool the job is bound to no longer exists. This is raised
                 regardless of raise_on_failure, since the launch can never
@@ -1148,6 +1151,21 @@ class StrategyExecutor:
                             if raise_on_failure:
                                 raise exceptions.ProvisionPrechecksError(
                                     reasons)
+                            limit_reached = any(
+                                isinstance(
+                                    err, exceptions.InstanceCreationLimitError)
+                                for err in reasons)
+                            if limit_reached:
+                                # The cluster has used up its instance
+                                # creations, so no relaunch of it can pass:
+                                # fail instead of letting recovery retry the
+                                # same refused launch forever.
+                                max_retries_error = (
+                                    exceptions.ManagedJobReachedMaxRetriesError)
+                                with ux_utils.print_exception_no_traceback():
+                                    raise max_retries_error(
+                                        'Instance creation limit reached: '
+                                        f'{reasons_str}') from e
                             return None
                         logger.info('Failed to launch a cluster with error: '
                                     f'{common_utils.format_exception(e)})')

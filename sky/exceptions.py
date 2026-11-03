@@ -280,6 +280,16 @@ class ProvisionUnsupportedError(Exception):
     pass
 
 
+class InstanceCreationLimitError(ProvisionUnsupportedError):
+    """Raised when a cluster has used up its allowed instance creations.
+
+    The limit counts creations for the cluster, not per candidate, so no
+    relaunch of the same cluster can pass it. Managed-job recovery fails the
+    job when this is the only reason a relaunch failed, instead of retrying.
+    """
+    pass
+
+
 class SkyPilotExcludeArgsBaseException(Exception):
     """Base class for exceptions that don't need args while serialization.
 

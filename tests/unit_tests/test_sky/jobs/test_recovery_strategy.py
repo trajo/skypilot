@@ -1,5 +1,6 @@
 """Unit tests for sky.jobs.recovery_strategy helpers."""
 import asyncio
+import pickle
 import types
 from unittest import mock
 
@@ -695,3 +696,97 @@ async def test_failover_terminates_a_stopped_cluster_it_cannot_restart(
         'raise_on_failure': False,
         'recovery': True
     }
+
+
+# ---------------------------------------------------------------------------
+# An exhausted Vast instance-creation limit is terminal, also in recovery.
+# ---------------------------------------------------------------------------
+
+
+def _creation_limit_failure(*other_failures):
+    """The launch error the API server returns when the limit is hit.
+
+    Built the way the backend's failover tail builds it, then carried through
+    the request store's serialize + pickle round trip.
+    """
+    limit = exceptions.InstanceCreationLimitError(
+        'Vast instance creation limit reached; '
+        'submit a new authorized request')
+    wrapped = exceptions.ResourcesUnavailableError(
+        'Failed to provision all possible launchable resources.',
+        failover_history=[limit, *other_failures])
+    return exceptions.deserialize_exception(
+        pickle.loads(pickle.dumps(exceptions.serialize_exception(wrapped))))
+
+
+def _make_recovering_executor(monkeypatch, strategy_cls, launch_error):
+    """A strategy executor whose real _launch gets `launch_error`."""
+    executor = _make_launch_executor()
+    executor.__class__ = strategy_cls
+    executor._launched_resources = None
+    executor._cluster_is_stopped = mock.AsyncMock(return_value=False)
+    executor._try_cancel_jobs = mock.AsyncMock()
+    executor._refresh_priority_from_persisted_dag = mock.AsyncMock()
+    executor._await_launch_request = mock.AsyncMock(side_effect=launch_error)
+    patches = _patch_launch_environment(monkeypatch)
+    return executor, patches
+
+
+@pytest.mark.asyncio
+async def test_creation_limit_on_first_launch_fails_prechecks(monkeypatch):
+    executor, patches = _make_recovering_executor(
+        monkeypatch, recovery_strategy.FailoverStrategyExecutor,
+        _creation_limit_failure())
+    with pytest.raises(exceptions.ProvisionPrechecksError) as error:
+        await asyncio.wait_for(executor.launch(), timeout=5)
+    assert isinstance(error.value.reasons[0],
+                      exceptions.InstanceCreationLimitError)
+    patches.sdk_launch.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('strategy_cls', [
+    recovery_strategy.FailoverStrategyExecutor,
+    recovery_strategy.EagerFailoverStrategyExecutor,
+])
+async def test_creation_limit_in_recovery_fails_instead_of_looping(
+        monkeypatch, strategy_cls):
+    executor, patches = _make_recovering_executor(monkeypatch, strategy_cls,
+                                                  _creation_limit_failure())
+    # Before the fix recover() retried the same refused launch forever; the
+    # timeout turns that regression into a failure instead of a hang.
+    with pytest.raises(exceptions.ManagedJobReachedMaxRetriesError,
+                       match='Instance creation limit reached'):
+        await asyncio.wait_for(executor.recover(), timeout=5)
+    patches.sdk_launch.assert_called_once()
+    patches.set_backoff_pending.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('strategy_cls', [
+    recovery_strategy.FailoverStrategyExecutor,
+    recovery_strategy.EagerFailoverStrategyExecutor,
+])
+async def test_creation_limit_with_capacity_failure_keeps_retrying(
+        monkeypatch, strategy_cls):
+    # Another candidate ran out of room: it might free up, so recovery keeps
+    # its retry behaviour.
+    executor, patches = _make_recovering_executor(
+        monkeypatch, strategy_cls,
+        _creation_limit_failure(
+            exceptions.ResourcesUnavailableError('No capacity in region')))
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(executor.recover(), timeout=1)
+    assert patches.sdk_launch.call_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_creation_limit_with_capacity_failure_returns_none(monkeypatch):
+    executor, patches = _make_recovering_executor(
+        monkeypatch, recovery_strategy.FailoverStrategyExecutor,
+        _creation_limit_failure(
+            exceptions.ResourcesUnavailableError('No capacity in region')))
+    assert await asyncio.wait_for(executor._launch(max_retry=1,
+                                                   raise_on_failure=False),
+                                  timeout=5) is None
+    patches.sdk_launch.assert_called_once()

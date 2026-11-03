@@ -457,6 +457,24 @@ def test_single_creation_limit_survives_cleanup(sdk, monkeypatch, tmp_path):
     assert sdk.create_instance.call_count == 1
 
 
+def test_creation_limit_raises_dedicated_error(monkeypatch, tmp_path):
+    # Managed-job recovery tells this apart from other unsupportable requests
+    # to fail instead of retrying; existing handling of the parent still
+    # applies, and it must never read as a capacity failure.
+    from sky import exceptions
+    from sky.provision.vast import journal
+    monkeypatch.setattr(journal, 'ROOT', tmp_path)
+    journal.register('display', 'cloud')
+    journal.creating('cloud-head', max_instance_creations=1)
+    journal.created('cloud-head', 456)
+    with pytest.raises(exceptions.InstanceCreationLimitError,
+                       match='creation limit') as error:
+        journal.creating('cloud-head', max_instance_creations=1)
+    assert isinstance(error.value, exceptions.ProvisionUnsupportedError)
+    assert not isinstance(error.value, exceptions.ResourcesUnavailableError)
+    assert journal.read('cloud')['pending'] is None
+
+
 def test_excluded_hosts_skip_to_next_cheapest(sdk, offer):
     bad = dict(offer, id=1, host_id=213498, dph_total=0.20)
     good = dict(offer, id=2, host_id=7, machine_id=70, dph_total=0.30)

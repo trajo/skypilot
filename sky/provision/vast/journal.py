@@ -68,7 +68,7 @@ def creating(label, max_instance_creations=None):
             raise RuntimeError(
                 'Vast creation limit requires a provisioning journal')
         if len(value['ids']) >= max_instance_creations:
-            raise exceptions.ProvisionUnsupportedError(
+            raise exceptions.InstanceCreationLimitError(
                 'Vast instance creation limit reached; '
                 'submit a new authorized request')
     if value is not None:
