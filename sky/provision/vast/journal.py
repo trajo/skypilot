@@ -3,56 +3,33 @@
 Kept outside cluster metadata so status refresh cannot erase cleanup evidence.
 Unknown create outcomes hold cleanup open until an exact label is discovered or
 an operator reconciles the request. Empty inventory cannot resolve them.
+
+Storage, identity and the creation limit are shared with other clouds (see
+sky.provision.creation_journal). Vast-specific here: one pending create at a
+time, keyed by instance label, rejected creates, and the hosts and offers each
+instance came from or was refused on.
 """
-import hashlib
-import json
-import os
 from pathlib import Path
-import tempfile
 import time
 
-from sky import exceptions
-from sky.utils import common_utils
+from sky.provision import creation_journal
+# Tests patch common_utils through this module.
+from sky.utils import common_utils  # pylint: disable=unused-import
 
 ROOT = Path.home() / '.sky' / 'vast-provisioning'
-
-
-def _path(name):
-    return ROOT / (hashlib.sha256(name.encode()).hexdigest() + '.json')
+_PROVIDER = 'Vast'
 
 
 def read(name):
-    path = _path(name)
-    return json.loads(path.read_text()) if path.exists() else None
+    return creation_journal.read(ROOT, name)
 
 
 def write(value):
-    ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with tempfile.NamedTemporaryFile(mode='w', dir=ROOT, delete=False) as out:
-        json.dump(value, out, sort_keys=True)
-        out.flush()
-        os.fsync(out.fileno())
-    os.replace(out.name, _path(value['name']))
-    directory = os.open(ROOT, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    creation_journal.write(ROOT, value)
 
 
 def register(cluster, name):
-    value = read(name)
-    if value is None:
-        write(
-            dict(cluster=cluster,
-                 name=name,
-                 user=common_utils.get_user_hash(),
-                 ids=[],
-                 pending=None,
-                 cleaned=False))
-    elif value['cluster'] != cluster or value[
-            'user'] != common_utils.get_user_hash():
-        raise RuntimeError('Vast provisioning identity mismatch')
+    creation_journal.register(ROOT, _PROVIDER, cluster, name, cleaned=False)
 
 
 def check_limit(label, max_instance_creations=None):
@@ -60,21 +37,9 @@ def check_limit(label, max_instance_creations=None):
 
     Returns the journal record, or None if there is none.
     """
-    value = read(label.rsplit('-', 1)[0])
-    if max_instance_creations is not None:
-        if (isinstance(max_instance_creations, bool) or
-                not isinstance(max_instance_creations, int) or
-                max_instance_creations < 1):
-            raise ValueError(
-                'max_instance_creations must be a positive integer')
-        if value is None:
-            raise RuntimeError(
-                'Vast creation limit requires a provisioning journal')
-        if len(value['ids']) >= max_instance_creations:
-            raise exceptions.InstanceCreationLimitError(
-                'Vast instance creation limit reached; '
-                'submit a new authorized request')
-    return value
+    return creation_journal.check_limit(ROOT, _PROVIDER,
+                                        label.rsplit('-', 1)[0],
+                                        max_instance_creations)
 
 
 def creating(label, max_instance_creations=None):
@@ -125,13 +90,7 @@ def recently_refused(label, seconds):
 
 
 def for_cluster(cluster):
-    if not ROOT.exists():
-        return []
-    return [
-        value for path in ROOT.glob('*.json')
-        if (value := json.loads(path.read_text()))['cluster'] == cluster and
-        value['user'] == common_utils.get_user_hash()
-    ]
+    return creation_journal.for_cluster(ROOT, cluster)
 
 
 def cleanup_cluster(cluster):
