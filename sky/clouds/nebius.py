@@ -406,6 +406,13 @@ class Nebius(clouds.Cloud):
             'security_group': security_group,
             'security_group_managed_by_skypilot':
                 str(security_group_managed_by_skypilot).lower(),
+            'max_instance_creations':
+                skypilot_config.get_effective_region_config(
+                    cloud='nebius',
+                    region=region.name,
+                    keys=('max_instance_creations',),
+                    default_value=None,
+                    override_configs=resources.cluster_config_overrides),
         }
 
         docker_run_options = []

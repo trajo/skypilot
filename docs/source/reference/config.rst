@@ -267,6 +267,7 @@ Below is the configuration syntax and some example values. See detailed explanat
     :ref:`tenant_id <config-yaml-nebius-tenant-id>`: tenant-1234567890
     :ref:`domain <config-yaml-nebius-domain>`: api.nebius.cloud:443
     :ref:`security_group_name <config-yaml-nebius-security-group-name>`: my-sg
+    :ref:`max_instance_creations <config-yaml-nebius-max-instance-creations>`: 3
 
   :ref:`vast <config-yaml-vast>`:
     :ref:`datacenter_only <config-yaml-vast-datacenter-only>`: true
@@ -3161,6 +3162,38 @@ Example:
       - my-training-*: my-training-sg
       - sky-serve-controller-*: my-serving-sg
       - "*": my-default-sg
+
+.. _config-yaml-nebius-max-instance-creations:
+
+``nebius.max_instance_creations``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Maximum number of VMs SkyPilot may ever create for a cluster (optional; a
+positive integer; default: no limit).
+
+The count covers every VM created under the cluster's name on the cloud, by
+every launch, failover candidate and region, and every managed job recovery
+(a managed job keeps its cluster name across recoveries), including VMs
+already torn down. Restarting stopped VMs does not count. A create counts once
+Nebius accepted it, or when its outcome is unknown (for example, a timeout),
+since its VM and boot disk may bill until teardown; a create Nebius refused
+does not count. A launch that would pass the limit fails before creating any
+VM, and managed job recovery then fails the job instead of retrying.
+
+SkyPilot keeps the count in ``~/.sky/nebius-provisioning/`` on the machine
+that launches the cluster (the API server, or the jobs controller for managed
+jobs). If a launch is interrupted while creating VMs, the cluster refuses
+further creates until an operator reconciles its record there. Deleting the
+record resets the count.
+
+This setting can be overridden per task via :ref:`config flag <config-client-cli-flag>`.
+
+Example:
+
+.. code-block:: yaml
+
+  nebius:
+    max_instance_creations: 3
 
 .. _config-yaml-vast:
 

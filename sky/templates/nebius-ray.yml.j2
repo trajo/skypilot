@@ -15,6 +15,9 @@ provider:
   security_group:
     GroupName: {{security_group}}
     ManagedBySkyPilot: {{security_group_managed_by_skypilot}}
+  {%- if max_instance_creations is defined and max_instance_creations is not none %}
+  max_instance_creations: {{max_instance_creations}}
+  {%- endif %}
 
 {%- if docker_image is not none %}
 docker:

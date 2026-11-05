@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import tempfile
 from typing import Any, Dict, List, Optional
+import uuid
 
 from sky import exceptions
 from sky.utils import common_utils
@@ -89,6 +90,47 @@ def check_limit(root: Path,
                 f'{provider} instance creation limit reached; '
                 'submit a new authorized request')
     return value
+
+
+def reserve(root: Path, provider: str, name: str, count: int,
+            max_instance_creations: int) -> List[str]:
+    """Durably reserve `count` creations, all or none, before any create.
+
+    Returns one slot per create, to be passed to resolve(). Raises at the
+    limit, and while slots of an earlier reservation are unresolved (their
+    creates may have run).
+    """
+    value = check_limit(root, provider, name, max_instance_creations, count)
+    if value is None:
+        raise RuntimeError(
+            f'{provider} creation limit requires a provisioning journal')
+    if value['pending']:
+        raise RuntimeError(f'Unresolved {provider} create; reconcile before '
+                           f'retry ({path(root, name)})')
+    slots = [uuid.uuid4().hex for _ in range(count)]
+    value['pending'] = slots
+    write(root, value)
+    return slots
+
+
+def resolve(root: Path, name: str, outcomes: Dict[str, Optional[str]]) -> None:
+    """Settle reserved slots: count each as its identity, or release None.
+
+    Count a create once it is confirmed or its outcome is unknown (identify it
+    by instance ID, or by name if the ID is unknown). Release (None) only a
+    create that never ran or that the provider definitely refused.
+    """
+    value = read(root, name)
+    if value is None:
+        raise RuntimeError(f'Provisioning journal for {name} is missing')
+    pending = list(value['pending'] or [])
+    for slot, identity in outcomes.items():
+        if slot in pending:
+            pending.remove(slot)
+            if identity is not None:
+                value['ids'].append(str(identity))
+    value['pending'] = pending or None
+    write(root, value)
 
 
 def for_cluster(root: Path, cluster: str) -> List[Dict[str, Any]]:

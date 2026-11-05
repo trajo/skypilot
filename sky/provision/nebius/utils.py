@@ -17,6 +17,17 @@ POLL_INTERVAL = 5
 
 _MAX_OPERATIONS_TO_FETCH = 1000
 
+# gRPC codes with which Nebius rejects a request without acting on it. Not
+# ALREADY_EXISTS: a create retried after a lost response could report that
+# for the VM its first attempt created. Other codes (UNAVAILABLE,
+# DEADLINE_EXCEEDED, UNKNOWN, INTERNAL, ABORTED, CANCELLED, ...) leave the
+# outcome unknown.
+_CREATE_REFUSAL_CODES = frozenset({
+    'INVALID_ARGUMENT', 'FAILED_PRECONDITION', 'OUT_OF_RANGE',
+    'PERMISSION_DENIED', 'UNAUTHENTICATED', 'NOT_FOUND', 'RESOURCE_EXHAUSTED',
+    'UNIMPLEMENTED'
+})
+
 # Re-export for back-compat with existing callers in this module.
 SECURITY_GROUP_TEMPLATE = nebius_constants.SECURITY_GROUP_TEMPLATE
 
@@ -179,6 +190,12 @@ def _is_already_exists_error(e: Any) -> bool:
     except Exception:  # pylint: disable=broad-except
         pass
     return 'already_exists' in str(e).lower()
+
+
+def _is_create_refusal(e: Any) -> bool:
+    """True iff a failed create call's RequestError means nothing exists."""
+    code = getattr(getattr(e, 'status', None), 'code', None)
+    return getattr(code, 'name', None) in _CREATE_REFUSAL_CODES
 
 
 def get_or_create_security_group(project_id: str, sg_name: str,
@@ -562,7 +579,17 @@ def launch(cluster_name_on_cloud: str,
            use_static_ip_address: bool = False,
            use_spot: bool = False,
            network_tier: Optional[resources_utils.NetworkTier] = None,
-           security_group_ids: Optional[List[str]] = None) -> str:
+           security_group_ids: Optional[List[str]] = None,
+           creation: Optional[Dict[str, Any]] = None) -> str:
+    """Creates a VM and waits until it starts.
+
+    `creation`, if given, is filled in as the create proceeds, for counting
+    creates: `name` just before the create call, `accepted` once the call
+    returned, `id` once the VM is seen, and `refused` if the call itself
+    failed with a code that means Nebius created nothing.
+    """
+    if creation is None:
+        creation = {}
     # Each node must have a unique name to avoid conflicts between
     # multiple worker VMs. To ensure uniqueness,a UUID is appended
     # to the node name.
@@ -666,6 +693,7 @@ def launch(cluster_name_on_cloud: str,
     sub_net_id = get_subnet_id(region, project_id)
     service = nebius.compute().InstanceServiceClient(nebius.sdk())
     logger.debug(f'Creating instance {instance_name} in project {project_id}.')
+    creation['name'] = instance_name
     try:
         nebius.sync_call(
             service.create(nebius.compute().CreateInstanceRequest(
@@ -709,6 +737,7 @@ def launch(cluster_name_on_cloud: str,
                     follows_spot_price=nebius.compute().FollowsSpotPriceSpec()
                     if use_spot else None,
                 ))))
+        creation['accepted'] = True
         instance_id = ''
         retry_count = 0
         while retry_count < nebius.MAX_RETRIES_TO_INSTANCE_READY:
@@ -719,6 +748,7 @@ def launch(cluster_name_on_cloud: str,
                     name=instance_name,
                 )))
             instance_id = instance.metadata.id
+            creation['id'] = instance_id
             if instance.status.state.name == 'STARTING':
                 break
 
@@ -765,6 +795,8 @@ def launch(cluster_name_on_cloud: str,
                 f' seconds) while waiting for instance {instance_name}'
                 f' to be ready.')
     except nebius.request_error() as e:
+        if 'accepted' not in creation and _is_create_refusal(e):
+            creation['refused'] = True
         logger.warning(f'Failed to launch instance {instance_name}: {e}')
         raise e
     return instance_id

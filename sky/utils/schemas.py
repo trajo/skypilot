@@ -2446,6 +2446,10 @@ def get_config_schema():
                 'disk_encrypted': {
                     'type': 'boolean',
                 },
+                'max_instance_creations': {
+                    'type': 'integer',
+                    'minimum': 1
+                },
                 'tenant_id': {
                     'type': 'string',
                 },

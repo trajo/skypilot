@@ -6,6 +6,7 @@ from sky import exceptions
 from sky import sky_logging
 from sky.provision import common
 from sky.provision.nebius import constants as nebius_constants
+from sky.provision.nebius import journal
 from sky.provision.nebius import utils
 from sky.utils import common_utils
 from sky.utils import resources_utils
@@ -82,10 +83,28 @@ def _wait_until_no_pending(region: str, cluster_name_on_cloud: str,
                            f' to be ready.')
 
 
+def _counted_as(creation: Dict[str, Any]) -> Optional[str]:
+    """What a reserved create counts as in the journal; None releases it.
+
+    utils.launch notes the instance name just before its create call, and
+    whether the provider refused that call. A create that never ran, or that
+    was definitely refused, created nothing. Any other create counts, also if
+    it failed later or its outcome is unknown: its VM and boot disk may bill
+    until teardown.
+    """
+    if 'name' not in creation or creation.get('refused'):
+        return None
+    return creation.get('id') or creation['name']
+
+
 def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
                   config: common.ProvisionConfig) -> common.ProvisionRecord:
     """Runs instances for the given cluster."""
-    del cluster_name  # unused
+    max_creations = config.provider_config.get('max_instance_creations')
+    if max_creations is not None:
+        # The name on cloud is stable across managed-job recoveries, so the
+        # journal bounds the job's creations, not only this launch's.
+        journal.register(cluster_name, cluster_name_on_cloud)
     project_id = config.provider_config.get('project_id')
     if project_id is None:
         project_id = utils.get_project_by_region(region)
@@ -150,6 +169,8 @@ def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
     # and Kubernetes (sky/provision/kubernetes/instance.py).
     platform, preset = config.node_config['InstanceType'].split('_')
     new_head_idx = 0 if head_instance_id is None else None
+    # Per new VM: how far its create got (see _counted_as).
+    creations: List[Dict[str, Any]] = [{} for _ in range(to_start_count)]
 
     def _launch_one(idx: int) -> str:
         node_type = 'head' if idx == new_head_idx else 'worker'
@@ -171,7 +192,33 @@ def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
                 'use_static_ip_address', False),
             filesystems=config.node_config.get('filesystems', []),
             network_tier=config.node_config.get('network_tier'),
-            security_group_ids=config.node_config.get('SecurityGroupIds'))
+            security_group_ids=config.node_config.get('SecurityGroupIds'),
+            creation=creations[idx])
+
+    def _launch_or_error(idx: int) -> Any:
+        try:
+            return _launch_one(idx)
+        except Exception as e:  # pylint: disable=broad-except
+            return e
+
+    def _launch_in_parallel(indices: List[int]) -> List[str]:
+        # Wait for every launch before raising the first error. Raising
+        # early would leave the other launch threads running (ThreadPool
+        # does not join them): their creates could go uncounted, and their
+        # VMs could appear after the caller tore the cluster down.
+        results = subprocess_utils.run_in_parallel(_launch_or_error, indices)
+        for result in results:
+            if isinstance(result, Exception):
+                raise result
+        return results
+
+    # Reserve every create before the first, so parallel creates cannot pass
+    # the limit and a cluster at its limit fails before creating anything.
+    # Resumed VMs above are not creates and do not count.
+    slots: List[str] = []
+    if max_creations is not None and to_start_count > 0:
+        slots = journal.reserve(cluster_name_on_cloud, to_start_count,
+                                max_creations)
 
     # When we're creating a brand-new head, launch it synchronously first.
     # utils.launch calls get_or_create_gpu_cluster for InfiniBand presets —
@@ -183,15 +230,20 @@ def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
         if new_head_idx is not None and to_start_count > 0:
             new_instance_ids = [_launch_one(0)]
             new_instance_ids.extend(
-                subprocess_utils.run_in_parallel(_launch_one,
-                                                 list(range(1,
-                                                            to_start_count))))
+                _launch_in_parallel(list(range(1, to_start_count))))
         else:
-            new_instance_ids = subprocess_utils.run_in_parallel(
-                _launch_one, list(range(to_start_count)))
+            new_instance_ids = _launch_in_parallel(list(range(to_start_count)))
     except Exception as e:  # pylint: disable=broad-except
         logger.warning(f'run_instances error: {e}')
         raise
+    finally:
+        # Every launch has finished here (see _launch_in_parallel).
+        if slots:
+            journal.resolve(
+                cluster_name_on_cloud, {
+                    slot: _counted_as(creation)
+                    for slot, creation in zip(slots, creations)
+                })
     for instance_id in new_instance_ids:
         logger.info(f'Launched instance {instance_id}.')
     created_instance_ids.extend(new_instance_ids)
