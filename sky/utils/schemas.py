@@ -525,6 +525,10 @@ def _get_single_resources_schema():
                 'required': [],
                 'additionalProperties': False,
                 'properties': {
+                    'runpod_cuda_versions': {
+                        'type': 'array', 'minItems': 1, 'uniqueItems': True,
+                        'items': {'type': 'string', 'pattern': r'^[0-9]+\.[0-9]+$'},
+                    },
                     'runtime_version': {
                         'type': 'string',
                     },
