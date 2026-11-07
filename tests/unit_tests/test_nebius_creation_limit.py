@@ -316,20 +316,58 @@ def test_cluster_larger_than_remaining_creations_creates_nothing(cloud):
     assert record['ids'] == [] and record['pending'] is None
 
 
-@pytest.mark.skipif(threading.current_thread() is not threading.main_thread(),
-                    reason='needs SIGINT delivered to the test thread')
-def test_cancellation_mid_launch_leaves_slots_reserved(cloud):
-    # Cancelling a launch (SIGINT -> KeyboardInterrupt in the main thread)
-    # while a worker is still about to create must not release that
-    # worker's slot: its create can still happen after run_instances exits.
-    cloud.outcomes = ['ok', 'ok', 'blocked']
+needs_main_thread = pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason='needs SIGINT delivered to the test thread')
+
+
+def _interrupt_mid_launch(cloud, interrupts):
+    """SIGINT the main thread `interrupts` times while a worker is about to
+    create, then let that worker finish."""
 
     def interrupt():
         cloud.blocked.wait(10)
-        threading.Event().wait(0.1)  # Let the main thread block on the join.
-        signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+        for _ in range(interrupts):
+            threading.Event().wait(0.1)  # Let the main thread block again.
+            signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+        threading.Event().wait(0.1)
+        cloud.unblock.set()
 
     threading.Thread(target=interrupt, daemon=True).start()
+
+
+def _wait_for_launches(cloud):
+    cloud.unblock.set()
+    for _ in range(500):
+        if cloud.running == 0:
+            return
+        threading.Event().wait(0.01)
+
+
+@needs_main_thread
+def test_cancellation_waits_for_running_launches(cloud):
+    # Cancelling a launch (SIGINT -> KeyboardInterrupt) must not return
+    # while a worker can still create a VM: the caller's teardown would miss
+    # it. The worker's create is then counted.
+    cloud.outcomes = ['ok', 'ok', 'blocked']
+    _interrupt_mid_launch(cloud, interrupts=1)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            _run(_config(count=3, limit=3))
+        assert cloud.running == 0
+        record = journal.read(CLUSTER)
+        assert record['pending'] is None
+        assert len(record['ids']) == 3
+    finally:
+        _wait_for_launches(cloud)
+
+
+@needs_main_thread
+def test_interrupted_wait_leaves_slots_reserved(cloud):
+    # A second interrupt cuts the wait short. A worker may still create, so
+    # no slot is released: they all stay pending (counted).
+    cloud.outcomes = ['ok', 'ok', 'blocked']
+    _interrupt_mid_launch(cloud, interrupts=2)
     try:
         with pytest.raises(KeyboardInterrupt):
             _run(_config(count=3, limit=3))
@@ -337,11 +375,7 @@ def test_cancellation_mid_launch_leaves_slots_reserved(cloud):
         assert record['pending'] is not None and len(record['pending']) == 3
         assert not record['ids']
     finally:
-        cloud.unblock.set()
-        for _ in range(500):
-            if cloud.running == 0:
-                break
-            threading.Event().wait(0.01)
+        _wait_for_launches(cloud)
 
 
 def test_unresolved_pending_slot_fails_closed(cloud):

@@ -218,10 +218,12 @@ def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
             len(indices), subprocess_utils.get_parallel_threads('nebius')))
         try:
             futures = [executor.submit(_launch_or_error, i) for i in indices]
+            results = [future.result() for future in futures]
         finally:
-            executor.shutdown(wait=True)  # A second interrupt skips the rest.
+            # On a first interrupt this still waits; a second one cuts it
+            # short and leaves launches_joined False.
+            executor.shutdown(wait=True)
             launches_joined = True
-        results = [future.result() for future in futures]
         for result in results:
             if isinstance(result, Exception):
                 raise result
