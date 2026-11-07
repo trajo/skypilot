@@ -229,7 +229,11 @@ class RunPod(clouds.Cloud):
                                       if resources.docker_username_for_runpod
                                       is not None else 'root')
 
+        # Validated by the resources schema.
+        versions = (resources.accelerator_args or
+                    {}).get('runpod_cuda_versions', [])
         return {
+            'runpod_cuda_versions': versions,
             'instance_type': instance_type,
             'custom_resources': custom_resources,
             'region': region.name,
