@@ -7,6 +7,7 @@ journal shared with Vast (sky.provision.creation_journal).
 # pylint: disable=protected-access
 import importlib.util
 import pathlib
+import signal
 import threading
 from unittest import mock
 
@@ -77,6 +78,8 @@ class FakeCloud:
         self.pending_at_launch = []
         self.outcomes = []
         self.running = 0
+        self.blocked = threading.Event()  # A 'blocked' create has started.
+        self.unblock = threading.Event()
         self._lock = threading.Lock()
         monkeypatch.setattr(utils, 'list_instances',
                             lambda project_id: dict(self.instances))
@@ -107,6 +110,11 @@ class FakeCloud:
         name = f'{cluster_name_on_cloud}-{index:04x}-{node_type}'
         if outcome == 'before_create':
             raise ValueError('no subnet')
+        if outcome == 'blocked':
+            # Not at the create call yet; waits for the test.
+            self.blocked.set()
+            self.unblock.wait(10)
+            outcome = 'ok'
         if outcome == 'slow_create':
             # Not at the create call yet when another worker fails.
             threading.Event().wait(0.5)
@@ -271,40 +279,10 @@ def test_parallel_worker_create_failing(cloud, outcome, count):
 
 
 @pytest.mark.parametrize('slow', ['slow', 'slow_create'])
-def test_failing_worker_waits_for_the_others(cloud, monkeypatch, slow):
+def test_failing_worker_waits_for_the_others(cloud, slow):
     # A worker that fails must not settle the journal while another worker
     # is still creating: that create would go uncounted (or be released
     # before it ran), and its VM could outlive the teardown.
-
-    def run_in_parallel(func, args):
-        # As subprocess_utils.run_in_parallel: results in order, the first
-        # error raised as soon as it occurs, other threads left running
-        # (ThreadPool.terminate does not join its threads). Threads start in
-        # order here so that call order matches argument order.
-        results = {}
-        errors = {}
-
-        def run(arg):
-            try:
-                results[arg] = func(arg)
-            except Exception as e:  # pylint: disable=broad-except
-                errors[arg] = e
-
-        threads = []
-        for arg in args:
-            started = len(cloud.launched)
-            threads.append(threading.Thread(target=run, args=(arg,)))
-            threads[-1].start()
-            while len(cloud.launched) == started and threads[-1].is_alive():
-                threading.Event().wait(0.01)
-        for arg, thread in zip(args, threads):
-            thread.join()
-            if arg in errors:
-                raise errors[arg]
-        return [results[arg] for arg in args]
-
-    monkeypatch.setattr(instance.subprocess_utils, 'run_in_parallel',
-                        run_in_parallel)
     cloud.outcomes = ['ok', 'refused', slow]
     with pytest.raises(RuntimeError, match='RESOURCE_EXHAUSTED'):
         _run(_config(count=3, limit=3))
@@ -336,6 +314,34 @@ def test_cluster_larger_than_remaining_creations_creates_nothing(cloud):
     assert cloud.launched == []
     record = journal.read(CLUSTER)
     assert record['ids'] == [] and record['pending'] is None
+
+
+@pytest.mark.skipif(threading.current_thread() is not threading.main_thread(),
+                    reason='needs SIGINT delivered to the test thread')
+def test_cancellation_mid_launch_leaves_slots_reserved(cloud):
+    # Cancelling a launch (SIGINT -> KeyboardInterrupt in the main thread)
+    # while a worker is still about to create must not release that
+    # worker's slot: its create can still happen after run_instances exits.
+    cloud.outcomes = ['ok', 'ok', 'blocked']
+
+    def interrupt():
+        cloud.blocked.wait(10)
+        threading.Event().wait(0.1)  # Let the main thread block on the join.
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+
+    threading.Thread(target=interrupt, daemon=True).start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            _run(_config(count=3, limit=3))
+        record = journal.read(CLUSTER)
+        assert record['pending'] is not None and len(record['pending']) == 3
+        assert not record['ids']
+    finally:
+        cloud.unblock.set()
+        for _ in range(500):
+            if cloud.running == 0:
+                break
+            threading.Event().wait(0.01)
 
 
 def test_unresolved_pending_slot_fails_closed(cloud):

@@ -1,4 +1,5 @@
 """Nebius instance provisioning."""
+import concurrent.futures
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -201,12 +202,26 @@ def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
         except Exception as e:  # pylint: disable=broad-except
             return e
 
+    # False while launch threads may still run (and create VMs).
+    launches_joined = True
+
     def _launch_in_parallel(indices: List[int]) -> List[str]:
-        # Wait for every launch before raising the first error. Raising
-        # early would leave the other launch threads running (ThreadPool
-        # does not join them): their creates could go uncounted, and their
-        # VMs could appear after the caller tore the cluster down.
-        results = subprocess_utils.run_in_parallel(_launch_or_error, indices)
+        # Join every launch before returning or raising, also on
+        # cancellation (KeyboardInterrupt), which ThreadPool-based
+        # run_in_parallel does not: the other threads' creates could go
+        # uncounted, and their VMs could appear after teardown.
+        nonlocal launches_joined
+        if not indices:
+            return []
+        launches_joined = False
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(
+            len(indices), subprocess_utils.get_parallel_threads('nebius')))
+        try:
+            futures = [executor.submit(_launch_or_error, i) for i in indices]
+        finally:
+            executor.shutdown(wait=True)  # A second interrupt skips the rest.
+            launches_joined = True
+        results = [future.result() for future in futures]
         for result in results:
             if isinstance(result, Exception):
                 raise result
@@ -237,8 +252,12 @@ def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
         logger.warning(f'run_instances error: {e}')
         raise
     finally:
-        # Every launch has finished here (see _launch_in_parallel).
-        if slots:
+        if slots and not launches_joined:
+            # Leave the slots pending: they count, and the cluster fails
+            # closed until someone checks for VMs created after this point.
+            logger.warning('Launches still running after an interrupt; '
+                           f'keeping {len(slots)} creation slots reserved.')
+        elif slots:
             journal.resolve(
                 cluster_name_on_cloud, {
                     slot: _counted_as(creation)
