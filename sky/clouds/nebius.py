@@ -3,6 +3,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import tempfile
 import typing
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
@@ -28,6 +29,24 @@ _INDENT_PREFIX = '    '
 
 logger = sky_logging.init_logger(__name__)
 
+_SAFE_NAME = re.compile(r'[A-Za-z0-9._-]+')
+_SAFE_ID = re.compile(r'[A-Za-z0-9-]+')
+
+
+def _mount_path(path: str, region: str) -> str:
+    """`path` normalized; raises ValueError unless it is a plain absolute path.
+
+    Mount paths are rendered into shell commands and docker -v options.
+    """
+    parts = [part for part in path.split('/') if part]
+    if (not path.startswith('/') or not parts or
+            any(part in ('.', '..') or not _SAFE_NAME.fullmatch(part)
+                for part in parts)):
+        raise ValueError(f'Nebius filesystems in {region}: mount path '
+                         f'{path!r} must be an absolute path of letters, '
+                         'digits, ".", "_" and "-".')
+    return '/' + '/'.join(parts)
+
 
 def _filesystems_for_region(region: str,
                             overrides: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -41,7 +60,8 @@ def _filesystems_for_region(region: str,
         ResourcesUnavailableError: the task declares filesystems but none for
             `region`, so failover skips it rather than launching without the
             mounts (the job would write to the boot disk instead).
-        ValueError: a filesystem ID or mount path appears more than once.
+        ValueError: an unsafe ID or mount path, an ID used twice, or mount
+            paths that are equal or nested.
     """
     server = skypilot_config.get_effective_region_config(cloud='nebius',
                                                          region=region,
@@ -59,20 +79,52 @@ def _filesystems_for_region(region: str,
             'skipping the region.')
     resources_vars_fs: List[Dict[str, str]] = []
     for i, fs in enumerate(here(server or []) + task_here):
+        if not _SAFE_ID.fullmatch(fs['filesystem_id']):
+            raise ValueError(f'Nebius filesystems in {region}: invalid '
+                             f'filesystem_id {fs["filesystem_id"]!r}.')
         resources_vars_fs.append({
             'filesystem_id': fs['filesystem_id'],
             'filesystem_attach_mode': fs.get('attach_mode', 'READ_WRITE'),
-            'filesystem_mount_path': fs.get(
-                'mount_path', f'/mnt/filesystem-skypilot-{i + 1}'),
+            'filesystem_mount_path': _mount_path(
+                fs.get('mount_path', f'/mnt/filesystem-skypilot-{i + 1}'),
+                region),
             'filesystem_mount_tag': f'filesystem-skypilot-{i + 1}'
         })
-    for key in ('filesystem_id', 'filesystem_mount_path'):
-        values = [fs[key] for fs in resources_vars_fs]
-        duplicates = sorted({v for v in values if values.count(v) > 1})
-        if duplicates:
-            raise ValueError(f'Nebius filesystems in {region}: {key} '
-                             f'{", ".join(duplicates)} used more than once.')
+    ids = [fs['filesystem_id'] for fs in resources_vars_fs]
+    duplicates = sorted({v for v in ids if ids.count(v) > 1})
+    if duplicates:
+        raise ValueError(f'Nebius filesystems in {region}: filesystem_id '
+                         f'{", ".join(duplicates)} used more than once.')
+    paths = [fs['filesystem_mount_path'] for fs in resources_vars_fs]
+    for i, a in enumerate(paths):
+        for b in paths[i + 1:]:
+            if a == b:
+                raise ValueError(f'Nebius filesystems in {region}: mount path '
+                                 f'{a} used more than once.')
+            if b.startswith(a + '/') or a.startswith(b + '/'):
+                raise ValueError(f'Nebius filesystems in {region}: mount '
+                                 f'paths {a} and {b} are nested.')
     return resources_vars_fs
+
+
+def _host_mount_command(fs: Dict[str, str]) -> str:
+    """Mounts `fs` on the host and checks it, or exits non-zero.
+
+    Run by the provisioner on every provision (see `host_setup_commands` in
+    the template), so the mount also returns when a stopped VM restarts in
+    place, and before docker starts the container that binds it.
+    """
+    path, tag = fs['filesystem_mount_path'], fs['filesystem_mount_tag']
+    command = (f'{{ sudo mkdir -p {path} && '
+               f'{{ mountpoint -q {path} || '
+               f'sudo mount -t virtiofs {tag} {path}; }} && '
+               f'[ "$(findmnt -n -o FSTYPE,SOURCE --mountpoint {path})" = '
+               f'"virtiofs {tag}" ]; }} || '
+               f'{{ echo "Nebius filesystem {tag} is not mounted at {path}" '
+               '>&2; exit 1; }')
+    if fs['filesystem_attach_mode'] == 'READ_WRITE':
+        command += f'; sudo chmod a+w {path}'
+    return command
 
 
 def nebius_profile_in_aws_cred_and_config() -> bool:
@@ -434,6 +486,9 @@ class Nebius(clouds.Cloud):
             'zones': None,
             'use_spot': resources.use_spot,
             'filesystems': resources_vars_fs,
+            'host_setup_commands': [
+                _host_mount_command(fs) for fs in resources_vars_fs
+            ],
             'network_tier': resources.network_tier,
             'disk_tier': _get_disk_tier(),
             'disk_encrypted': disk_encrypted,
@@ -460,10 +515,12 @@ class Nebius(clouds.Cloud):
 
         docker_run_options = []
         if resources.extract_docker_image() is not None:
-            # The host mounts them at boot (see the template's bootcmd).
+            # The host mounts them before docker starts (host_setup_commands).
             for fs in resources_vars_fs:
                 path = fs['filesystem_mount_path']
-                docker_run_options.append(f'-v {path}:{path}')
+                read_only = fs['filesystem_attach_mode'] == 'READ_ONLY'
+                docker_run_options.append(
+                    f'-v {path}:{path}{":ro" if read_only else ""}')
 
         if acc_dict is not None:
             # Nebius cloud's docker runtime information does not contain

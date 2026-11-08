@@ -2458,7 +2458,7 @@ def get_config_schema():
                 # price) instead of following the spot price.
                 'spot_pricing_policy_id': {
                     'type': 'string',
-                    'minLength': 1,
+                    'pattern': '^[A-Za-z0-9-]+$',
                 },
                 # Filesystems attached in addition to the region's
                 # `region_configs.<region>.filesystems`. An entry with
@@ -2472,7 +2472,7 @@ def get_config_schema():
                         'properties': {
                             'filesystem_id': {
                                 'type': 'string',
-                                'minLength': 1,
+                                'pattern': '^[A-Za-z0-9-]+$',
                             },
                             'attach_mode': {
                                 'type': 'string',
@@ -2480,9 +2480,15 @@ def get_config_schema():
                                     'READ_WRITE', 'READ_ONLY'
                                 ]
                             },
+                            # Rendered into shell commands and docker -v:
+                            # plain absolute paths only.
                             'mount_path': {
                                 'type': 'string',
-                                'pattern': '^/',
+                                'pattern': '^/[A-Za-z0-9._/-]*[A-Za-z0-9_-]'
+                                           '[A-Za-z0-9._/-]*$',
+                                'not': {
+                                    'pattern': '(^|/)[.][.]?(/|$)'
+                                },
                             },
                             'region': {
                                 'type': 'string',

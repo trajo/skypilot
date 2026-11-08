@@ -390,6 +390,36 @@ def _parallel_ssh_with_cache(func,
 
 
 @common.log_function_start_end
+def run_host_setup_commands(cluster_name: str, commands: List[str],
+                            cluster_info: common.ClusterInfo,
+                            ssh_credentials: Dict[str, Any]) -> None:
+    """Runs `commands` on every node's host, at every provision.
+
+    Uncached, unlike the setup stage, so they also run when a stopped instance
+    restarts in place. Raises RuntimeError if a command fails.
+    """
+
+    def _run(runner: command_runner.CommandRunner, log_path: str) -> None:
+        for cmd in commands:
+            returncode, stdout, stderr = runner.run(cmd,
+                                                    stream_logs=False,
+                                                    log_path=log_path,
+                                                    require_outputs=True)
+            if returncode:
+                raise RuntimeError(
+                    f'Host setup command failed (exit code {returncode}): '
+                    f'{cmd}\n===== stdout =====\n{stdout}\n'
+                    f'===== stderr =====\n{stderr}')
+
+    _parallel_ssh_with_cache(_run,
+                             cluster_name,
+                             stage_name='host_setup_commands',
+                             digest=None,
+                             cluster_info=cluster_info,
+                             ssh_credentials=ssh_credentials)
+
+
+@common.log_function_start_end
 def initialize_docker(cluster_name: str, docker_config: Dict[str, Any],
                       cluster_info: common.ClusterInfo,
                       ssh_credentials: Dict[str, Any]) -> Optional[str]:

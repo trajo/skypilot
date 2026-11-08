@@ -686,6 +686,14 @@ def _post_provision_setup(
         logger.info(f'{indent_str}{colorama.Style.DIM}{vm_str}{plural} {verb} '
                     f'up.{colorama.Style.RESET_ALL}')
 
+        host_setup_commands = config_from_yaml.get('host_setup_commands')
+        if host_setup_commands:
+            # On the host (no docker_user yet), before docker starts.
+            instance_setup.run_host_setup_commands(cluster_name.name_on_cloud,
+                                                   host_setup_commands,
+                                                   cluster_info,
+                                                   ssh_credentials)
+
         # It's promised by the cluster config that docker_config does not
         # exist for docker-native clouds, i.e. they provide docker containers
         # instead of full VMs, like Kubernetes and RunPod, as it requires some

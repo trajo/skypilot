@@ -3236,16 +3236,26 @@ without a server-wide setting.
 Each entry has:
 
 - ``filesystem_id`` (required): an existing Nebius filesystem.
-- ``mount_path`` (optional, absolute): default ``/mnt/filesystem-skypilot-<N>``.
-- ``attach_mode`` (optional): ``READ_WRITE`` (default) or ``READ_ONLY``.
+- ``mount_path`` (optional): an absolute path of letters, digits, ``.``,
+  ``_`` and ``-``; default ``/mnt/filesystem-skypilot-<N>``. Mount paths may
+  not be equal or nested.
+- ``attach_mode`` (optional): ``READ_WRITE`` (default) or ``READ_ONLY``. The
+  Nebius API accepts ``READ_ONLY``, but Nebius documents only ``READ_WRITE``
+  for filesystem attachments.
 - ``region`` (optional): attach only when launching in this region. Without
   it, the entry applies in every region, so pin the task's region, since
   filesystems are regional.
 
 If a task declares filesystems but none apply to a candidate region,
 SkyPilot skips that region instead of launching without the mounts. A
-filesystem ID or mount path used twice is an error. Mounts are recorded in
-``/etc/fstab``, so they return when a stopped VM restarts in place.
+filesystem ID used twice is an error.
+
+SkyPilot mounts the filesystems on each VM's host at every provisioning,
+before it starts the task's container (if any), and fails the launch if a
+filesystem is not mounted. So mounts also return when a stopped VM restarts in
+place (``sky start``, or a managed job recovering from a spot preemption). With
+a Docker image, each mount path is bind-mounted into the container (read-only
+for ``READ_ONLY``).
 
 This setting can be overridden per task via :ref:`config flag <config-client-cli-flag>`.
 

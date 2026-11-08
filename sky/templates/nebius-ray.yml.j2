@@ -112,17 +112,6 @@ available_node_types:
             ssh_authorized_keys:
               - |-
                 skypilot:ssh_public_key_content
-        {#- Every boot, before sshd: the setup stage is cached per instance ID,
-            so a VM restarted in place (spot preemption, `sky start`) skips it,
-            and with a docker image it runs inside the container. #}
-        {%- if filesystems %}
-        bootcmd:
-        {%- for fs in filesystems %}
-          - mkdir -p {{ fs.filesystem_mount_path }}
-          - mountpoint -q {{ fs.filesystem_mount_path }} || mount -t virtiofs {{ fs.filesystem_mount_tag }} {{ fs.filesystem_mount_path }}
-          - chmod a+w {{ fs.filesystem_mount_path }} || true
-        {%- endfor %}
-        {%- endif %}
 
 head_node_type: ray_head_default
 
@@ -139,6 +128,15 @@ file_mounts: {
 rsync_exclude: []
 
 initialization_commands: []
+
+# Run by the provisioner on each node's host (not in its container) at every
+# provision, uncached and before docker starts; a failing command fails it.
+{%- if host_setup_commands %}
+host_setup_commands:
+  {%- for command in host_setup_commands %}
+  - {{ command | tojson }}
+  {%- endfor %}
+{%- endif %}
 
 # List of shell commands to run to set up nodes.
 # NOTE: these are very performance-sensitive. Each new item opens/closes an SSH
@@ -158,14 +156,6 @@ setup_commands:
   # Line 'python3 -c ..': patch the buggy ray files and enable `-o allow_other` option for `goofys`
   - {%- for initial_setup_command in initial_setup_commands %}
     {{ initial_setup_command }}
-    {%- endfor %}
-    {#- The host mounts filesystems at every boot (UserData bootcmd); this only
-        covers images without cloud-init. With a docker image it runs in the
-        container, where the bind mount already makes it a no-op. #}
-    {%- for fs in filesystems %}
-    sudo mkdir -p {{ fs.filesystem_mount_path }};
-    mountpoint -q {{ fs.filesystem_mount_path }} || sudo mount -t virtiofs {{ fs.filesystem_mount_tag }} {{ fs.filesystem_mount_path }};
-    sudo chmod a+w {{ fs.filesystem_mount_path }};
     {%- endfor %}
     sudo systemctl stop unattended-upgrades || true;
     sudo systemctl disable unattended-upgrades || true;
