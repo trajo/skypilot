@@ -268,6 +268,12 @@ Below is the configuration syntax and some example values. See detailed explanat
     :ref:`domain <config-yaml-nebius-domain>`: api.nebius.cloud:443
     :ref:`security_group_name <config-yaml-nebius-security-group-name>`: my-sg
     :ref:`max_instance_creations <config-yaml-nebius-max-instance-creations>`: 3
+    :ref:`spot_pricing_policy_id <config-yaml-nebius-spot-pricing-policy-id>`: pricingpolicy-e00example
+    :ref:`filesystems <config-yaml-nebius-filesystems>`:
+      - filesystem_id: computefilesystem-e00example
+        mount_path: /mnt/weights
+        attach_mode: READ_ONLY
+        region: eu-north1
 
   :ref:`vast <config-yaml-vast>`:
     :ref:`datacenter_only <config-yaml-vast-datacenter-only>`: true
@@ -3194,6 +3200,65 @@ Example:
 
   nebius:
     max_instance_creations: 3
+
+.. _config-yaml-nebius-spot-pricing-policy-id:
+
+``nebius.spot_pricing_policy_id``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Billing pricing policy for spot VMs (optional; default: none).
+
+By default a spot VM accepts the current spot price. With a pricing policy,
+it accepts the spot price up to the policy's maximum price; above that,
+Nebius preempts it (the VM stops, as for any spot preemption). On-demand VMs
+ignore this setting. A VM restarted in place while the spot price is still
+above the maximum may fail to start or be preempted again.
+
+This setting can be overridden per task via :ref:`config flag <config-client-cli-flag>`.
+
+Example:
+
+.. code-block:: yaml
+
+  nebius:
+    spot_pricing_policy_id: pricingpolicy-e00example
+
+.. _config-yaml-nebius-filesystems:
+
+``nebius.filesystems``
+~~~~~~~~~~~~~~~~~~~~~~
+
+Shared filesystems to attach and mount on every node, in addition to the
+region's ``region_configs.<region>.filesystems`` (optional; default: none).
+Meant for a task's ``config:``, so one task can attach its own filesystems
+without a server-wide setting.
+
+Each entry has:
+
+- ``filesystem_id`` (required): an existing Nebius filesystem.
+- ``mount_path`` (optional, absolute): default ``/mnt/filesystem-skypilot-<N>``.
+- ``attach_mode`` (optional): ``READ_WRITE`` (default) or ``READ_ONLY``.
+- ``region`` (optional): attach only when launching in this region. Without
+  it, the entry applies in every region, so pin the task's region, since
+  filesystems are regional.
+
+If a task declares filesystems but none apply to a candidate region,
+SkyPilot skips that region instead of launching without the mounts. A
+filesystem ID or mount path used twice is an error. Mounts are recorded in
+``/etc/fstab``, so they return when a stopped VM restarts in place.
+
+This setting can be overridden per task via :ref:`config flag <config-client-cli-flag>`.
+
+Example:
+
+.. code-block:: yaml
+
+  nebius:
+    filesystems:
+      - filesystem_id: computefilesystem-e00example
+        mount_path: /mnt/weights
+        attach_mode: READ_ONLY
+        region: eu-north1
 
 .. _config-yaml-vast:
 

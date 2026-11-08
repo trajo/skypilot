@@ -29,6 +29,52 @@ _INDENT_PREFIX = '    '
 logger = sky_logging.init_logger(__name__)
 
 
+def _filesystems_for_region(region: str,
+                            overrides: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Filesystems to attach in `region`, as template variables.
+
+    The server's filesystems (`region_configs.<region>.filesystems`, else a
+    server-wide `nebius.filesystems`) come first, then the task's own
+    `config.nebius.filesystems`. Entries with a `region` apply only there.
+
+    Raises:
+        ResourcesUnavailableError: the task declares filesystems but none for
+            `region`, so failover skips it rather than launching without the
+            mounts (the job would write to the boot disk instead).
+        ValueError: a filesystem ID or mount path appears more than once.
+    """
+    server = skypilot_config.get_effective_region_config(cloud='nebius',
+                                                         region=region,
+                                                         keys=('filesystems',),
+                                                         default_value=[])
+    task = (overrides or {}).get('nebius', {}).get('filesystems') or []
+
+    def here(entries):
+        return [fs for fs in entries if fs.get('region', region) == region]
+
+    task_here = here(task)
+    if task and not task_here:
+        raise exceptions.ResourcesUnavailableError(
+            f'The task declares Nebius filesystems, none in {region}; '
+            'skipping the region.')
+    resources_vars_fs: List[Dict[str, str]] = []
+    for i, fs in enumerate(here(server or []) + task_here):
+        resources_vars_fs.append({
+            'filesystem_id': fs['filesystem_id'],
+            'filesystem_attach_mode': fs.get('attach_mode', 'READ_WRITE'),
+            'filesystem_mount_path': fs.get(
+                'mount_path', f'/mnt/filesystem-skypilot-{i + 1}'),
+            'filesystem_mount_tag': f'filesystem-skypilot-{i + 1}'
+        })
+    for key in ('filesystem_id', 'filesystem_mount_path'):
+        values = [fs[key] for fs in resources_vars_fs]
+        duplicates = sorted({v for v in values if values.count(v) > 1})
+        if duplicates:
+            raise ValueError(f'Nebius filesystems in {region}: {key} '
+                             f'{", ".join(duplicates)} used more than once.')
+    return resources_vars_fs
+
+
 def nebius_profile_in_aws_cred_and_config() -> bool:
     """Checks if Nebius Object Storage profile is set in aws credentials
     and profile."""
@@ -324,20 +370,8 @@ class Nebius(clouds.Cloud):
             else:
                 image_id = cloud_image_id[region.name]
 
-        config_fs = skypilot_config.get_effective_region_config(
-            cloud='nebius',
-            region=region.name,
-            keys=('filesystems',),
-            default_value=[])
-        resources_vars_fs = []
-        for i, fs in enumerate(config_fs):
-            resources_vars_fs.append({
-                'filesystem_id': fs['filesystem_id'],
-                'filesystem_attach_mode': fs.get('attach_mode', 'READ_WRITE'),
-                'filesystem_mount_path': fs.get(
-                    'mount_path', f'/mnt/filesystem-skypilot-{i + 1}'),
-                'filesystem_mount_tag': f'filesystem-skypilot-{i + 1}'
-            })
+        resources_vars_fs = _filesystems_for_region(
+            region.name, resources.cluster_config_overrides)
 
         use_static_ip_address = skypilot_config.get_nested(
             ('nebius', 'use_static_ip_address'), default_value=False)
@@ -413,9 +447,23 @@ class Nebius(clouds.Cloud):
                     keys=('max_instance_creations',),
                     default_value=None,
                     override_configs=resources.cluster_config_overrides),
+            # Only spot VMs have a pricing model to choose.
+            'spot_pricing_policy_id':
+                skypilot_config.get_effective_region_config(
+                    cloud='nebius',
+                    region=region.name,
+                    keys=('spot_pricing_policy_id',),
+                    default_value=None,
+                    override_configs=resources.cluster_config_overrides)
+                if resources.use_spot else None,
         }
 
         docker_run_options = []
+        if resources.extract_docker_image() is not None:
+            # The host mounts them at boot (see the template's bootcmd).
+            for fs in resources_vars_fs:
+                path = fs['filesystem_mount_path']
+                docker_run_options.append(f'-v {path}:{path}')
 
         if acc_dict is not None:
             # Nebius cloud's docker runtime information does not contain

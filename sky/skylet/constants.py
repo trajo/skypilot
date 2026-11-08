@@ -685,6 +685,8 @@ OVERRIDEABLE_CONFIG_KEYS_IN_TASK: List[Tuple[str, ...]] = [
     ('vast', 'max_hourly_cost'),
     ('vast', 'max_instance_creations'),
     ('nebius', 'max_instance_creations'),
+    ('nebius', 'spot_pricing_policy_id'),
+    ('nebius', 'filesystems'),
     ('vast', 'excluded_hosts'),
     ('vast', 'create_instance_kwargs'),
     ('slurm', 'sbatch_options'),

@@ -185,6 +185,8 @@ def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
             disk_size=config.node_config['DiskSize'],
             user_data=config.node_config['UserData'],
             use_spot=config.node_config['use_spot'],
+            spot_pricing_policy_id=config.node_config.get(
+                'spot_pricing_policy_id'),
             associate_public_ip_address=(
                 not config.provider_config['use_internal_ips']),
             disk_tier=config.node_config['disk_tier'],

@@ -2454,6 +2454,42 @@ def get_config_schema():
                     'type': 'integer',
                     'minimum': 1
                 },
+                # Spot VMs reference this billing pricing policy (its maximum
+                # price) instead of following the spot price.
+                'spot_pricing_policy_id': {
+                    'type': 'string',
+                    'minLength': 1,
+                },
+                # Filesystems attached in addition to the region's
+                # `region_configs.<region>.filesystems`. An entry with
+                # `region` applies only there. Meant for task `config:`.
+                'filesystems': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'object',
+                        'required': ['filesystem_id'],
+                        'additionalProperties': False,
+                        'properties': {
+                            'filesystem_id': {
+                                'type': 'string',
+                                'minLength': 1,
+                            },
+                            'attach_mode': {
+                                'type': 'string',
+                                'case_sensitive_enum': [
+                                    'READ_WRITE', 'READ_ONLY'
+                                ]
+                            },
+                            'mount_path': {
+                                'type': 'string',
+                                'pattern': '^/',
+                            },
+                            'region': {
+                                'type': 'string',
+                            },
+                        }
+                    }
+                },
                 'tenant_id': {
                     'type': 'string',
                 },

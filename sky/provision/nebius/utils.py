@@ -578,6 +578,7 @@ def launch(cluster_name_on_cloud: str,
            disk_encrypted: bool = False,
            use_static_ip_address: bool = False,
            use_spot: bool = False,
+           spot_pricing_policy_id: Optional[str] = None,
            network_tier: Optional[resources_utils.NetworkTier] = None,
            security_group_ids: Optional[List[str]] = None,
            creation: Optional[Dict[str, Any]] = None) -> str:
@@ -734,8 +735,14 @@ def launch(cluster_name_on_cloud: str,
                     preemptible=nebius.compute().PreemptibleSpec(
                         on_preemption=nebius.compute().PreemptibleSpec.
                         PreemptionPolicy.STOP) if use_spot else None,
+                    # Pricing model (one of): a spot VM follows the spot
+                    # price unless it references a pricing policy, whose
+                    # maximum price preempts it when exceeded.
                     follows_spot_price=nebius.compute().FollowsSpotPriceSpec()
-                    if use_spot else None,
+                    if use_spot and not spot_pricing_policy_id else None,
+                    spot_pricing_policy=nebius.compute().SpotPricingPolicySpec(
+                        id=spot_pricing_policy_id)
+                    if use_spot and spot_pricing_policy_id else None,
                 ))))
         creation['accepted'] = True
         instance_id = ''
