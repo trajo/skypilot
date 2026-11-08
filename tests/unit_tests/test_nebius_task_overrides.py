@@ -590,7 +590,7 @@ def test_unsafe_mount_paths_are_rejected(path):
                 }]
             }
         })
-    # Server region entries are checked when used, too.
+    # Server region entries: rejected when the config loads.
     server = {
         'nebius': {
             'region_configs': {
@@ -603,9 +603,14 @@ def test_unsafe_mount_paths_are_rejected(path):
             }
         }
     }
-    with skypilot_config.override_skypilot_config(server):
-        with pytest.raises(ValueError, match='mount path'):
-            _variables()
+    with pytest.raises(jsonschema.ValidationError):
+        _validate(server)
+    with pytest.raises(exceptions.InvalidSkyPilotConfigError):
+        with skypilot_config.override_skypilot_config(server):
+            pass
+    # And again where they are rendered.
+    with pytest.raises(ValueError, match='mount path'):
+        nebius_cloud._mount_path(path, 'eu-north1')
 
 
 @pytest.mark.parametrize('fs_id', ['', 'a b', 'fs:1', 'fs$(id)'])
@@ -693,7 +698,8 @@ def test_host_setup_command_failure_raises():
                                                    _cluster_info(1), {})
 
 
-def test_provisioner_runs_host_commands_before_docker(monkeypatch):
+@pytest.mark.parametrize('host_fails', [False, True])
+def test_provisioner_runs_host_commands_before_docker(monkeypatch, host_fails):
     # pylint: disable=import-outside-toplevel
     from sky.provision import common
     from sky.provision import instance_setup
@@ -713,6 +719,8 @@ def test_provisioner_runs_host_commands_before_docker(monkeypatch):
         del cluster_name, cluster_info
         assert 'docker_user' not in ssh_credentials  # On the host.
         order.append(('host', tuple(commands)))
+        if host_fails:  # E.g. a worker's mount failed.
+            raise RuntimeError('Host setup command failed')
 
     config = {
         'provider': {},
@@ -746,10 +754,11 @@ def test_provisioner_runs_host_commands_before_docker(monkeypatch):
                                     head_instance_id='i-0',
                                     resumed_instance_ids=['i-0'],
                                     created_instance_ids=[])
-    with pytest.raises(Stop):
+    with pytest.raises(RuntimeError if host_fails else Stop):
         provisioner._post_provision_setup(
             resources,
             resources_utils.ClusterName(display_name='c',
                                         name_on_cloud='c-1234'), 'yaml', record,
             None)
-    assert order == ['ssh', ('host', ('mount it',)), 'docker']
+    expected = ['ssh', ('host', ('mount it',))]
+    assert order == (expected if host_fails else expected + ['docker'])

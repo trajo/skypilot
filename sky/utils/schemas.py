@@ -1881,6 +1881,21 @@ _SLURM_USERNAME_MAP_SCHEMA = {
 }
 
 
+# Nebius filesystem IDs and mount paths are rendered into shell commands and
+# docker -v options: plain IDs and absolute paths only.
+_NEBIUS_FS_ID = {
+    'type': 'string',
+    'pattern': '^[A-Za-z0-9-]+$',
+}
+_NEBIUS_MOUNT_PATH = {
+    'type': 'string',
+    'pattern': '^/[A-Za-z0-9._/-]*[A-Za-z0-9_-][A-Za-z0-9._/-]*$',
+    'not': {
+        'pattern': '(^|/)[.][.]?(/|$)'
+    },
+}
+
+
 def get_config_schema():
     # pylint: disable=import-outside-toplevel
     from sky.server import daemons
@@ -2470,26 +2485,14 @@ def get_config_schema():
                         'required': ['filesystem_id'],
                         'additionalProperties': False,
                         'properties': {
-                            'filesystem_id': {
-                                'type': 'string',
-                                'pattern': '^[A-Za-z0-9-]+$',
-                            },
+                            'filesystem_id': _NEBIUS_FS_ID,
                             'attach_mode': {
                                 'type': 'string',
                                 'case_sensitive_enum': [
                                     'READ_WRITE', 'READ_ONLY'
                                 ]
                             },
-                            # Rendered into shell commands and docker -v:
-                            # plain absolute paths only.
-                            'mount_path': {
-                                'type': 'string',
-                                'pattern': '^/[A-Za-z0-9._/-]*[A-Za-z0-9_-]'
-                                           '[A-Za-z0-9._/-]*$',
-                                'not': {
-                                    'pattern': '(^|/)[.][.]?(/|$)'
-                                },
-                            },
+                            'mount_path': _NEBIUS_MOUNT_PATH,
                             'region': {
                                 'type': 'string',
                             },
@@ -2534,18 +2537,14 @@ def get_config_schema():
                                     'type': 'object',
                                     'additionalProperties': False,
                                     'properties': {
-                                        'filesystem_id': {
-                                            'type': 'string',
-                                        },
+                                        'filesystem_id': _NEBIUS_FS_ID,
                                         'attach_mode': {
                                             'type': 'string',
                                             'case_sensitive_enum': [
                                                 'READ_WRITE', 'READ_ONLY'
                                             ]
                                         },
-                                        'mount_path': {
-                                            'type': 'string',
-                                        }
+                                        'mount_path': _NEBIUS_MOUNT_PATH,
                                     }
                                 }
                             },

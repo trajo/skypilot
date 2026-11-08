@@ -272,7 +272,7 @@ Below is the configuration syntax and some example values. See detailed explanat
     :ref:`filesystems <config-yaml-nebius-filesystems>`:
       - filesystem_id: computefilesystem-e00example
         mount_path: /mnt/weights
-        attach_mode: READ_ONLY
+        attach_mode: READ_WRITE
         region: eu-north1
 
   :ref:`vast <config-yaml-vast>`:
@@ -3239,16 +3239,17 @@ Each entry has:
 - ``mount_path`` (optional): an absolute path of letters, digits, ``.``,
   ``_`` and ``-``; default ``/mnt/filesystem-skypilot-<N>``. Mount paths may
   not be equal or nested.
-- ``attach_mode`` (optional): ``READ_WRITE`` (default) or ``READ_ONLY``. The
-  Nebius API accepts ``READ_ONLY``, but Nebius documents only ``READ_WRITE``
-  for filesystem attachments.
+- ``attach_mode`` (optional): ``READ_WRITE`` (default) or ``READ_ONLY``.
+  ``READ_ONLY`` is unverified: Nebius documents only ``READ_WRITE`` for
+  filesystem attachments.
 - ``region`` (optional): attach only when launching in this region. Without
   it, the entry applies in every region, so pin the task's region, since
   filesystems are regional.
 
 If a task declares filesystems but none apply to a candidate region,
 SkyPilot skips that region instead of launching without the mounts. A
-filesystem ID used twice is an error.
+filesystem ID used twice is an error. The same rules for IDs and mount paths
+apply to ``region_configs.<region>.filesystems``.
 
 SkyPilot mounts the filesystems on each VM's host at every provisioning,
 before it starts the task's container (if any), and fails the launch if a
@@ -3267,7 +3268,7 @@ Example:
     filesystems:
       - filesystem_id: computefilesystem-e00example
         mount_path: /mnt/weights
-        attach_mode: READ_ONLY
+        attach_mode: READ_WRITE
         region: eu-north1
 
 .. _config-yaml-vast:
